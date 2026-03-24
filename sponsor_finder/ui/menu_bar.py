@@ -585,8 +585,18 @@ def _switch_profile(app, profile_name):
 def _new_profile(app):
     """Open Profile Builder for a new blank profile."""
     from ui.profile_editor import ProfileEditorDialog
-    dlg = ProfileEditorDialog(app, profile_data=None)
-    app.wait_window(dlg)
+    from profiles import upsert_profile, save_profiles
+
+    dlg = ProfileEditorDialog(app, profile=None)
+    result = dlg.result()
+    if result:
+        app._profiles = upsert_profile(app._profiles, result)
+        save_profiles(app._profiles)
+        if hasattr(app, "_sidebar"):
+            app._sidebar.update_profiles([p.get("name", "") for p in app._profiles])
+            app._sidebar.profile_var.set(result.get("name", "No profile"))
+        if hasattr(app, "_on_profile_load"):
+            app._on_profile_load(result.get("name", ""))
 
 
 def _edit_active_profile(app):
@@ -597,8 +607,17 @@ def _edit_active_profile(app):
             for p in app._profiles:
                 if p.get("name") == active_name:
                     from ui.profile_editor import ProfileEditorDialog
-                    dlg = ProfileEditorDialog(app, profile_data=p)
-                    app.wait_window(dlg)
+                    from profiles import upsert_profile, save_profiles
+
+                    dlg = ProfileEditorDialog(app, profile=p)
+                    result = dlg.result()
+                    if result:
+                        app._profiles = upsert_profile(app._profiles, result)
+                        save_profiles(app._profiles)
+                        app._sidebar.update_profiles([x.get("name", "") for x in app._profiles])
+                        app._sidebar.profile_var.set(result.get("name", active_name))
+                        if hasattr(app, "_on_profile_load"):
+                            app._on_profile_load(result.get("name", active_name))
                     return
 
     messagebox.showinfo("No Profile", "No active profile selected.")

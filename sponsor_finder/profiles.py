@@ -19,8 +19,20 @@ except ImportError:
 PROFILES_FILE = get_profiles_path()
 
 
+def _ensure_profiles_file_exists() -> None:
+    """Create profiles.json with an empty list if missing or empty."""
+    try:
+        if not os.path.exists(PROFILES_FILE) or os.path.getsize(PROFILES_FILE) == 0:
+            with open(PROFILES_FILE, "w", encoding="utf-8") as f:
+                json.dump([], f, indent=2, ensure_ascii=False)
+    except OSError:
+        # Best effort only; callers still handle read failures safely.
+        pass
+
+
 def load_profiles() -> list[dict]:
     """Load all profiles from profiles.json. Returns [] if file doesn't exist."""
+    _ensure_profiles_file_exists()
     if os.path.exists(PROFILES_FILE):
         try:
             with open(PROFILES_FILE, "r", encoding="utf-8") as f:
@@ -35,6 +47,7 @@ def load_profiles() -> list[dict]:
 def save_profiles(profiles: list[dict]) -> None:
     """Persist the full profiles list to profiles.json."""
     try:
+        _ensure_profiles_file_exists()
         with open(PROFILES_FILE, "w", encoding="utf-8") as f:
             json.dump(profiles, f, indent=2, ensure_ascii=False)
     except OSError as e:

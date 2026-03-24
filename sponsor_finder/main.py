@@ -1009,6 +1009,7 @@ class App(tk.Tk):
         self._ai_max_score      = max(10, int(ai_cfg.get("max_score", 50)))
         self._ai_disable_max_limit = bool(ai_cfg.get("disable_max_limit", True))
         self._ai_running        = False   # is local AI model loaded?
+        self._ai_prompt_active  = False
 
         self._apply_window_geometry()
         self._build_ui()
@@ -2078,7 +2079,8 @@ class App(tk.Tk):
                 # Model file exists but failed to load
                 self.after(500, self._prompt_download_model)
 
-        self.after(0, _on_model_loaded, False)  # Initially unavailable
+        self._ai_running = False
+        self._sidebar.set_ai_status(False)
         threading.Thread(target=_run, daemon=True).start()
 
     # Backward compatibility alias
@@ -2090,6 +2092,10 @@ class App(tk.Tk):
         Show a prompt when no models are available.
         Offers to open AI Settings to download one.
         """
+        if self._ai_prompt_active:
+            return
+
+        self._ai_prompt_active = True
         models = ai_scoring.list_models()
         if models:
             # Model exists but failed to load — might be corrupted
@@ -2102,13 +2108,16 @@ class App(tk.Tk):
                 "(Recommended: llama3 — ~4 GB, one-time download per machine)"
             )
 
-        answer = messagebox.askyesno(
-            "AI Model Required",
-            msg,
-            parent=self,
-        )
-        if answer:
-            self._open_ai_settings()
+        try:
+            answer = messagebox.askyesno(
+                "AI Model Required",
+                msg,
+                parent=self,
+            )
+            if answer:
+                self._open_ai_settings()
+        finally:
+            self._ai_prompt_active = False
 
     def _open_ai_settings(self):
         dlg = AISettingsDialog(

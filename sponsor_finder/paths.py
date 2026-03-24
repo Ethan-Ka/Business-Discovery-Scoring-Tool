@@ -15,10 +15,26 @@ def get_app_base_dir() -> str:
     - Packaged executable: directory containing the executable
     - Source/dev mode: project root (parent of sponsor_finder package)
     """
+    exe_path = os.path.abspath(sys.executable)
+    exe_dir = os.path.dirname(exe_path)
+    exe_name = os.path.basename(exe_path).lower()
+
+    # Packaged app (PyInstaller/cx_Freeze/etc.)
     if getattr(sys, "frozen", False):
-        return os.path.dirname(os.path.abspath(sys.executable))
+        return exe_dir
+
+    # Fallback for packaging edge-cases where sys.frozen may not be set
+    # but we're still running a dedicated app executable.
+    if exe_name.endswith(".exe") and exe_name not in ("python.exe", "pythonw.exe"):
+        return exe_dir
 
     sponsor_finder_dir = os.path.dirname(os.path.abspath(__file__))
+    # Some packaged layouts place modules under "_internal/sponsor_finder"
+    # while still using an executable one level above "_internal".
+    internal_dir = os.path.dirname(sponsor_finder_dir)
+    if os.path.basename(internal_dir).lower() == "_internal":
+        return os.path.dirname(internal_dir)
+
     return os.path.dirname(sponsor_finder_dir)
 
 

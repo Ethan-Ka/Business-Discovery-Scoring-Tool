@@ -108,6 +108,24 @@
             {
                 "field": "industry",
                 "operator": "=",
+                "value": "Bar",
+                "points": 4
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Tattoo Shop",
+                "points": 5
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Sports Retail",
+                "points": 3
+            },
+            {
+                "field": "industry",
+                "operator": "=",
                 "value": "Car Audio Shop",
                 "points": 24
             },

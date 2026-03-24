@@ -55,6 +55,55 @@ AVAILABLE_EXPORT_COLUMNS = [
 ]
 
 
+class ScrollableTab(ttk.Frame):
+    """Simple vertical scroll container for tab content."""
+    def __init__(self, parent):
+        super().__init__(parent)
+
+        self._canvas = tk.Canvas(self, highlightthickness=0, borderwidth=0)
+        self._vscroll = ttk.Scrollbar(self, orient="vertical", command=self._canvas.yview)
+        self._canvas.configure(yscrollcommand=self._vscroll.set)
+
+        self.content = ttk.Frame(self._canvas)
+        self._window_id = self._canvas.create_window((0, 0), window=self.content, anchor="nw")
+
+        self._canvas.pack(side="left", fill="both", expand=True)
+        self._vscroll.pack(side="right", fill="y")
+
+        self.content.bind("<Configure>", self._on_content_configure)
+        self._canvas.bind("<Configure>", self._on_canvas_configure)
+
+        self._canvas.bind("<Enter>", self._bind_mousewheel)
+        self._canvas.bind("<Leave>", self._unbind_mousewheel)
+
+    def _on_content_configure(self, _event=None):
+        self._canvas.configure(scrollregion=self._canvas.bbox("all"))
+
+    def _on_canvas_configure(self, event):
+        self._canvas.itemconfigure(self._window_id, width=event.width)
+
+    def _bind_mousewheel(self, _event=None):
+        self._canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        self._canvas.bind_all("<Button-4>", self._on_mousewheel)
+        self._canvas.bind_all("<Button-5>", self._on_mousewheel)
+
+    def _unbind_mousewheel(self, _event=None):
+        self._canvas.unbind_all("<MouseWheel>")
+        self._canvas.unbind_all("<Button-4>")
+        self._canvas.unbind_all("<Button-5>")
+
+    def _on_mousewheel(self, event):
+        if event.num == 4:
+            self._canvas.yview_scroll(-1, "units")
+            return
+        if event.num == 5:
+            self._canvas.yview_scroll(1, "units")
+            return
+        delta = int(-1 * (event.delta / 120)) if event.delta else 0
+        if delta:
+            self._canvas.yview_scroll(delta, "units")
+
+
 class RuleBuilderWidget(ttk.Frame):
     """
     Table-like widget for editing scoring rules.
@@ -251,7 +300,7 @@ class AudienceKeywordsWidget(ttk.Frame):
             w.destroy()
 
         chips_row = ttk.Frame(self.chips_frame)
-        chips_row.pack(fill="x", wraplength=400)
+        chips_row.pack(fill="x")
 
         for kw in self.keywords:
             chip = ttk.Frame(chips_row, relief="solid", borderwidth=1)
@@ -439,12 +488,12 @@ class ProfileEditorDialog(tk.Toplevel):
         notebook = ttk.Notebook(frm)
         notebook.pack(fill="both", expand=True)
 
-        self._tab_general = ttk.Frame(notebook, padding=10)
-        self._tab_scoring = ttk.Frame(notebook, padding=10)
-        self._tab_audience = ttk.Frame(notebook, padding=10)
-        self._tab_filters = ttk.Frame(notebook, padding=10)
-        self._tab_export = ttk.Frame(notebook, padding=10)
-        self._tab_sources = ttk.Frame(notebook, padding=10)
+        self._tab_general = ScrollableTab(notebook)
+        self._tab_scoring = ScrollableTab(notebook)
+        self._tab_audience = ScrollableTab(notebook)
+        self._tab_filters = ScrollableTab(notebook)
+        self._tab_export = ScrollableTab(notebook)
+        self._tab_sources = ScrollableTab(notebook)
 
         notebook.add(self._tab_general, text="General")
         notebook.add(self._tab_scoring, text="Scoring Rules")
@@ -466,35 +515,44 @@ class ProfileEditorDialog(tk.Toplevel):
         ttk.Button(btn_frm, text="Save", command=self._save).pack(side="right", padx=4)
         ttk.Button(btn_frm, text="Cancel", command=self.destroy).pack(side="right")
 
-    def _build_general_tab(self):
-        ttk.Label(self._tab_general, text="Name:").grid(row=0, column=0, sticky="w", pady=4)
-        self.name_var = tk.StringVar(value=self.name)
-        ttk.Entry(self._tab_general, textvariable=self.name_var, width=60).grid(row=0, column=1, sticky="ew", pady=4)
+    @staticmethod
+    def _tab_body(tab):
+        return getattr(tab, "content", tab)
 
-        ttk.Label(self._tab_general, text="Description:").grid(row=1, column=0, sticky="nw", pady=4)
+    def _build_general_tab(self):
+        body = self._tab_body(self._tab_general)
+
+        ttk.Label(body, text="Name:").grid(row=0, column=0, sticky="w", pady=4)
+        self.name_var = tk.StringVar(value=self.name)
+        ttk.Entry(body, textvariable=self.name_var, width=60).grid(row=0, column=1, sticky="ew", pady=4)
+
+        ttk.Label(body, text="Description:").grid(row=1, column=0, sticky="nw", pady=4)
         self.desc_var = tk.StringVar(value=self.description)
-        desc_text = tk.Text(self._tab_general, height=6, width=60)
+        desc_text = tk.Text(body, height=6, width=60)
         desc_text.insert("1.0", self.description)
         desc_text.grid(row=1, column=1, sticky="nsew", pady=4)
         self.desc_text = desc_text
 
-        self._tab_general.columnconfigure(1, weight=1)
-        self._tab_general.rowconfigure(1, weight=1)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(1, weight=1)
 
     def _build_scoring_tab(self):
-        ttk.Label(self._tab_scoring, text="Scoring Rules (rules are additive, max score 100):").pack(anchor="w", pady=(0, 8))
-        self.rules_widget = RuleBuilderWidget(self._tab_scoring)
+        body = self._tab_body(self._tab_scoring)
+        ttk.Label(body, text="Scoring Rules (rules are additive, max score 100):").pack(anchor="w", pady=(0, 8))
+        self.rules_widget = RuleBuilderWidget(body)
         self.rules_widget.pack(fill="both", expand=True)
         self.rules_widget.set_rules(self.scoring_rules)
 
     def _build_audience_tab(self):
-        ttk.Label(self._tab_audience, text="Audience Keywords:").pack(anchor="w", pady=(0, 8))
-        self.audience_widget = AudienceKeywordsWidget(self._tab_audience)
+        body = self._tab_body(self._tab_audience)
+        ttk.Label(body, text="Audience Keywords:").pack(anchor="w", pady=(0, 8))
+        self.audience_widget = AudienceKeywordsWidget(body)
         self.audience_widget.pack(fill="both", expand=True)
         self.audience_widget.set_keywords(self.audience_keywords)
 
     def _build_filters_tab(self):
-        frm = ttk.Frame(self._tab_filters, padding=10)
+        body = self._tab_body(self._tab_filters)
+        frm = ttk.Frame(body, padding=10)
         frm.pack(fill="both", expand=True)
 
         # Hide chains
@@ -512,15 +570,18 @@ class ProfileEditorDialog(tk.Toplevel):
         ttk.Spinbox(frm, textvariable=self.max_distance_var, from_=0.5, to=100, width=10).pack(anchor="w")
 
     def _build_export_tab(self):
-        ttk.Label(self._tab_export, text="Select columns to include in CSV export:").pack(anchor="w", pady=(0, 8))
-        self.export_widget = ExportColumnsWidget(self._tab_export)
+        body = self._tab_body(self._tab_export)
+        ttk.Label(body, text="Select columns to include in CSV export:").pack(anchor="w", pady=(0, 8))
+        self.export_widget = ExportColumnsWidget(body)
         self.export_widget.pack(fill="both", expand=True)
         self.export_widget.set_columns(self.export_columns)
 
     def _build_sources_tab(self):
-        ttk.Label(self._tab_sources, text="Enable data sources:").pack(anchor="w", pady=(0, 8))
-        self.sources_widget = SourceCheckboxesWidget(self._tab_sources)
+        body = self._tab_body(self._tab_sources)
+        ttk.Label(body, text="Enable data sources:").pack(anchor="w", pady=(0, 8))
+        self.sources_widget = SourceCheckboxesWidget(body)
         self.sources_widget.pack(anchor="w")
+        self.sources_widget.set_sources(self.data_sources)
 
     def _save(self):
         """Validate and save profile."""

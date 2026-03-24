@@ -2,8 +2,9 @@
 Model management for llama-cpp-python.
 Handles model registry, downloading, caching, and loading.
 
-Models are stored in ~/.cache/sponsor_finder/models/ as .gguf files.
-Uses Ollama-style naming (e.g., "llama3.2", "mistral") but maps to GGUF URLs.
+Models are stored in {app_base}/data/models/ as .gguf files.
+For packaged executables this resolves to {exe_dir}/data/models/.
+Uses Ollama-style naming (e.g., "llama3", "mistral") but maps to GGUF URLs.
 """
 
 import os
