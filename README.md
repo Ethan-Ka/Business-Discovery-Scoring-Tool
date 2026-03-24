@@ -2,6 +2,9 @@
 
 A local-first Python desktop app for finding and scoring nearby businesses as potential sponsors (built for car meet outreach, but profile-driven for other use cases too).
 
+## Releases
+- Latest releases: https://github.com/Ethan-Ka/Sponsor-Finder/releases
+
 ## Quick Overview
 - Tkinter desktop app (Windows-first, cross-platform capable)
 - Searches local businesses via OpenStreetMap/Overpass
@@ -20,5 +23,3 @@ pip install -r requirements.txt
 python sponsor_finder/main.py
 ```
 
-## Releases
-- Latest releases: https://github.com/Ethan-Ka/Sponsor-Finder/releases
