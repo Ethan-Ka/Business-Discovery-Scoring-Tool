@@ -1,0 +1,460 @@
+[
+    {
+        "name": "Car Meet Sponsor",
+        "description": "Find local businesses likely to sponsor a car meet or car club event in the DFW area. Prioritize independent, locally-owned brands connected to car culture, surrounding enthusiast hobbies, and food spots that naturally align with meet traffic.",
+        "scoring_rules": [
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Auto Parts",
+                "points": 30
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Automotive Shop",
+                "points": 28
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Car Wash",
+                "points": 25
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Tire Shop",
+                "points": 27
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Performance Shop",
+                "points": 30
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Detailing",
+                "points": 28
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Auto Detailing",
+                "points": 30
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Auto Wrap Shop",
+                "points": 30
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Tint Shop",
+                "points": 27
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Auto Body Shop",
+                "points": 28
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Sign Shop",
+                "points": 24
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Print Shop",
+                "points": 20
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Watch Store",
+                "points": 18
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Car Rental",
+                "points": 15
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Motorcycle Shop",
+                "points": 20
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Gas Station",
+                "points": 10
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Gym",
+                "points": 4
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Car Audio Shop",
+                "points": 24
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Wheel Shop",
+                "points": 26
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Motorsports Shop",
+                "points": 24
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Off-Road Shop",
+                "points": 20
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Coffee Shop",
+                "points": 14
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Cafe",
+                "points": 12
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Burger Restaurant",
+                "points": 12
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "BBQ Restaurant",
+                "points": 12
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Taco Restaurant",
+                "points": 11
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Pizza Restaurant",
+                "points": 10
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Wings Restaurant",
+                "points": 10
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Boba Tea Shop",
+                "points": 9
+            },
+            {
+                "field": "industry",
+                "operator": "=",
+                "value": "Fast Food",
+                "points": 6
+            },
+            {
+                "field": "audience_overlap",
+                "operator": "contains",
+                "value": "car",
+                "points": 14
+            },
+            {
+                "field": "audience_overlap",
+                "operator": "contains",
+                "value": "automotive",
+                "points": 14
+            },
+            {
+                "field": "audience_overlap",
+                "operator": "contains",
+                "value": "enthusiast",
+                "points": 10
+            },
+            {
+                "field": "audience_overlap",
+                "operator": "contains",
+                "value": "motorsport",
+                "points": 10
+            },
+            {
+                "field": "audience_overlap",
+                "operator": "contains",
+                "value": "car meet",
+                "points": 12
+            },
+            {
+                "field": "audience_overlap",
+                "operator": "contains",
+                "value": "nightlife",
+                "points": 5
+            },
+            {
+                "field": "audience_overlap",
+                "operator": "contains",
+                "value": "late-night",
+                "points": 5
+            },
+            {
+                "field": "is_chain",
+                "operator": "=",
+                "value": false,
+                "points": 12
+            },
+            {
+                "field": "has_website",
+                "operator": "=",
+                "value": true,
+                "points": 5
+            },
+            {
+                "field": "has_phone",
+                "operator": "=",
+                "value": true,
+                "points": 4
+            },
+            {
+                "field": "has_email",
+                "operator": "=",
+                "value": true,
+                "points": 3
+            },
+            {
+                "field": "distance_mi",
+                "operator": "<",
+                "value": 2,
+                "points": 8
+            },
+            {
+                "field": "distance_mi",
+                "operator": "<",
+                "value": 5,
+                "points": 5
+            },
+            {
+                "field": "distance_mi",
+                "operator": "<",
+                "value": 10,
+                "points": 2
+            },
+            {
+                "field": "num_locations",
+                "operator": "<",
+                "value": 5,
+                "points": 4
+            },
+            {
+                "field": "osm_completeness",
+                "operator": ">",
+                "value": 50,
+                "points": 3
+            }
+        ],
+        "audience_keywords": [
+            "car",
+            "automotive",
+            "enthusiast",
+            "mechanic",
+            "racing",
+            "performance",
+            "detailing",
+            "tuning",
+            "stance",
+            "drift",
+            "cars and coffee",
+            "car meet",
+            "car club",
+            "track day",
+            "autocross",
+            "motorsport",
+            "jdm",
+            "muscle car",
+            "euro car",
+            "off-road",
+            "overland",
+            "motorcycle",
+            "custom",
+            "modded",
+            "wheels",
+            "wrap",
+            "vinyl",
+            "tint",
+            "sign",
+            "graphics",
+            "watch",
+            "timepiece",
+            "auto repair",
+            "body shop",
+            "coffee",
+            "cafe",
+            "burger",
+            "bbq",
+            "tacos",
+            "pizza",
+            "wings",
+            "boba",
+            "late night",
+            "young adults",
+            "men 18-35"
+        ],
+        "priority_keywords": [
+            "wrap",
+            "vinyl",
+            "tint",
+            "detail",
+            "sign",
+            "graphics",
+            "watch",
+            "performance",
+            "repair",
+            "body shop",
+            "wheels",
+            "audio",
+            "motorsport",
+            "off-road",
+            "cars and coffee",
+            "burger",
+            "bbq",
+            "taco",
+            "boba"
+        ],
+        "priority_bonus_cap": 18,
+        "require_relevance_for_generic": true,
+        "generic_scale_without_relevance": 0.25,
+        "default_filters": {
+            "hide_chains": true,
+            "min_score": 25,
+            "max_score": 100,
+            "max_distance_mi": 10,
+            "min_osm_completeness": 0
+        },
+        "export_columns": [
+            "Name",
+            "Score",
+            "Industry",
+            "Entity Type",
+            "Chain",
+            "Distance",
+            "Phone",
+            "Email",
+            "Website",
+            "Address",
+            "Audience",
+            "AI Insight",
+            "Notes"
+        ],
+        "data_sources": [
+            "overpass",
+            "wikidata"
+        ]
+    },
+    {
+        "name": "General Outreach",
+        "description": "Neutral baseline for general local business outreach. No domain-specific scoring — prioritizes local independents with good contact info and proximity.",
+        "scoring_rules": [
+            {
+                "field": "is_chain",
+                "operator": "=",
+                "value": false,
+                "points": 25
+            },
+            {
+                "field": "has_website",
+                "operator": "=",
+                "value": true,
+                "points": 20
+            },
+            {
+                "field": "has_phone",
+                "operator": "=",
+                "value": true,
+                "points": 15
+            },
+            {
+                "field": "has_email",
+                "operator": "=",
+                "value": true,
+                "points": 15
+            },
+            {
+                "field": "distance_mi",
+                "operator": "<",
+                "value": 2,
+                "points": 20
+            },
+            {
+                "field": "distance_mi",
+                "operator": "<",
+                "value": 5,
+                "points": 12
+            },
+            {
+                "field": "distance_mi",
+                "operator": "<",
+                "value": 10,
+                "points": 5
+            },
+            {
+                "field": "osm_completeness",
+                "operator": ">",
+                "value": 50,
+                "points": 5
+            }
+        ],
+        "audience_keywords": [],
+        "default_filters": {
+            "hide_chains": false,
+            "min_score": 0,
+            "max_score": 100,
+            "max_distance_mi": 25,
+            "min_osm_completeness": 0
+        },
+        "export_columns": [
+            "Name",
+            "Score",
+            "Industry",
+            "Entity Type",
+            "Chain",
+            "Distance",
+            "Phone",
+            "Email",
+            "Website",
+            "Address",
+            "Notes"
+        ],
+        "data_sources": [
+            "overpass",
+            "wikidata"
+        ]
+    }
+]
