@@ -34,6 +34,7 @@ from profiles import load_profiles, save_profiles, get_profile, upsert_profile, 
 from paths import get_data_dir, get_tile_cache_path
 import ai_scoring
 import applog
+import theme as _theme
 
 
 def is_windows() -> bool:
@@ -1328,6 +1329,7 @@ class App(tk.Tk):
         self._collections: dict = load_collections()
         self._search_lat  = None
         self._search_lon  = None
+        self._search_cancellation_token: CancellationToken | None = None
         self._search_radius = self._config.get("last_radius_miles", 5.0)
         self._max_results_limit = int(self._config.get("last_max_results", MAX_RESULTS))
         self._max_results_limit = max(50, min(MAX_RESULTS, self._max_results_limit))
@@ -1349,8 +1351,12 @@ class App(tk.Tk):
         self._ai_running        = False   # is local AI model loaded?
         self._ai_prompt_active  = False
 
+        self._dark_mode: bool = bool(self._config.get("dark_mode", False))
+
         self._apply_window_geometry()
         self._build_ui()
+        # Apply the saved theme after UI is constructed
+        self._apply_theme(self._dark_mode)
         self._sidebar.ai_scoring_var.set(self._ai_scoring_on)
         self._sidebar.ai_scoring_var.trace_add(
             "write", lambda *_: self._update_score_column_heading()
@@ -1381,6 +1387,40 @@ class App(tk.Tk):
     # Backward compatibility alias
     def _run_ollama_setup(self):
         self._open_ai_setup()
+
+    # ------------------------------------------------------------------
+    # Theme
+    # ------------------------------------------------------------------
+
+    def _apply_theme(self, dark: bool) -> None:
+        """Apply light or dark theme and persist the preference."""
+        self._dark_mode = dark
+        self._config["dark_mode"] = dark
+        save_config(self._config)
+
+        _theme.apply_theme(self, dark)
+        p = _theme.get_palette(dark)
+
+        # Update treeview row-color tags
+        if hasattr(self, "_tree"):
+            self._tree.tag_configure("green", background=p["tree_green"])
+            self._tree.tag_configure("red",   background=p["tree_red"])
+            self._tree.tag_configure("odd",   background=p["tree_odd"])
+            self._tree.tag_configure("even",  background=p["tree_even"])
+
+        # Update detail pane text widget backgrounds
+        if hasattr(self, "_detail"):
+            try:
+                self._detail.text.configure(bg=p["detail_bg"], fg=p["fg"],
+                                            insertbackground=p["fg"])
+                self._detail._ai_text.configure(bg=p["ai_bg"], fg=p["fg"],
+                                                insertbackground=p["fg"])
+            except Exception:
+                pass
+
+        # Sync menu checkbutton if already created
+        if hasattr(self, "_dark_mode_var"):
+            self._dark_mode_var.set(dark)
 
     # ------------------------------------------------------------------
     # Geometry
@@ -1507,72 +1547,16 @@ class App(tk.Tk):
         self._sidebar.refresh_saved_searches(self._saved_searches)
         outer_paned.add(self._sidebar, weight=0)
 
-        # --- Results | custom sash | Detail ---
-        # Placed manually inside a container so we fully control sash appearance.
-        center = ttk.Frame(outer_paned)
-        outer_paned.add(center, weight=1)
+        # --- Results | Detail (ttk.PanedWindow — matches the left sidebar sash) ---
+        inner_paned = ttk.PanedWindow(outer_paned, orient="horizontal")
+        outer_paned.add(inner_paned, weight=1)
 
-        results_frame = ttk.Frame(center)
+        results_frame = ttk.Frame(inner_paned)
         self._build_treeview(results_frame)
+        inner_paned.add(results_frame, weight=1)
 
-        # Sash: plain frame with grip dots on a Canvas
-        _SASH_W = 6
-        sash = tk.Frame(center, width=_SASH_W, bg="#d0d0d0",
-                        cursor="sb_h_double_arrow")
-        dot_cv = tk.Canvas(sash, width=_SASH_W, bg="#d0d0d0",
-                           highlightthickness=0)
-        dot_cv.pack(fill="both", expand=True)
-
-        def _draw_dots(cv):
-            cv.delete("all")
-            cw, ch = cv.winfo_width(), cv.winfo_height()
-            if cw < 2 or ch < 2:
-                return
-            cx, cy = cw // 2, ch // 2
-            offsets = (-8, -4, 0, 4, 8)
-            # Connecting line behind the dots
-            cv.create_line(cx, cy + offsets[0], cx, cy + offsets[-1],
-                           fill="#999999", width=2)
-            # Dots on top
-            for dy in offsets:
-                cv.create_oval(cx - 2, cy + dy - 2, cx + 2, cy + dy + 2,
-                               fill="#999999", outline="")
-
-        dot_cv.bind("<Configure>", lambda e: _draw_dots(dot_cv))
-
-        self._detail = DetailPane(center, self._notes, on_note_saved=self._on_note_saved)
-
-        # _sash_x == None means "use 50% on first render"
-        self._sash_x: int | None = None
-
-        def _relayout(event=None):
-            w = center.winfo_width()
-            h = center.winfo_height()
-            if w <= 1 or h <= 1:
-                return
-            if self._sash_x is None:
-                self._sash_x = w // 2
-            sx = max(300, min(self._sash_x, w - _SASH_W - 150))
-            results_frame.place(x=0,            y=0, width=sx,               height=h)
-            sash.place         (x=sx,           y=0, width=_SASH_W,          height=h)
-            self._detail.place (x=sx + _SASH_W, y=0, width=w - sx - _SASH_W, height=h)
-
-        center.bind("<Configure>", _relayout)
-
-        _drag: dict = {}
-
-        def _sash_press(e):
-            _drag["x"]  = e.x_root
-            _drag["sx"] = self._sash_x if self._sash_x is not None \
-                          else center.winfo_width() // 2
-
-        def _sash_move(e):
-            self._sash_x = _drag["sx"] + (e.x_root - _drag["x"])
-            _relayout()
-
-        for widget in (sash, dot_cv):
-            widget.bind("<Button-1>", _sash_press)
-            widget.bind("<B1-Motion>", _sash_move)
+        self._detail = DetailPane(inner_paned, self._notes, on_note_saved=self._on_note_saved)
+        inner_paned.add(self._detail, weight=0)
 
     def _build_treeview(self, parent):
         # Columns include a hidden checkbox-equivalent: managed via selection + shortlist set
@@ -1603,10 +1587,12 @@ class App(tk.Tk):
         parent.columnconfigure(0, weight=1)
 
         # Row color tags — green ≥70, red <40, alternating odd/even for 40–69
-        self._tree.tag_configure("green",       background="#d4efdf")
-        self._tree.tag_configure("red",         background="#fadbd8")
-        self._tree.tag_configure("odd",         background="#f5f5f5")
-        self._tree.tag_configure("even",        background="#ffffff")
+        # (re-configured by _apply_theme whenever the mode changes)
+        p = _theme.get_palette(getattr(self, "_dark_mode", False))
+        self._tree.tag_configure("green", background=p["tree_green"])
+        self._tree.tag_configure("red",   background=p["tree_red"])
+        self._tree.tag_configure("odd",   background=p["tree_odd"])
+        self._tree.tag_configure("even",  background=p["tree_even"])
         self._tree.tag_configure("shortlisted", foreground="#1a5276", font=("", 9, "bold"))
 
         self._tree.bind("<<TreeviewSelect>>", self._on_row_select)
@@ -1633,8 +1619,17 @@ class App(tk.Tk):
         self._count_var = tk.StringVar(value="")
         ttk.Label(bar, textvariable=self._count_var).pack(side="right", padx=8)
 
-        self._progress = ttk.Progressbar(bar, mode="indeterminate", length=120)
-        self._progress.pack(side="right", padx=8)
+        # Progress + Cancel live in a sub-frame so the cancel button always
+        # appears immediately to the left of the progress bar.
+        prog_frame = ttk.Frame(bar)
+        prog_frame.pack(side="right", padx=4)
+
+        self._progress = ttk.Progressbar(prog_frame, mode="indeterminate", length=120)
+        self._progress.pack(side="right")
+
+        self._cancel_btn = ttk.Button(prog_frame, text="Cancel",
+                                      command=self._on_cancel_search)
+        # Hidden until a search is active
 
         self._status_var = tk.StringVar(value="Ready. Enter a location and click Search.")
         ttk.Label(bar, textvariable=self._status_var, anchor="w").pack(side="left", fill="x",
@@ -2232,6 +2227,7 @@ class App(tk.Tk):
 
     def _geocode_then_search(self, address: str):
         self._set_status("Geocoding address…")
+        self._search_cancellation_token = CancellationToken()
         self._start_progress()
         self._search_btn.config(state="disabled")
 
@@ -2255,6 +2251,10 @@ class App(tk.Tk):
         def _process():
             try:
                 msg = q.get_nowait()
+                # If cancelled during geocoding, discard the result silently
+                if (self._search_cancellation_token
+                        and self._search_cancellation_token.is_cancelled()):
+                    return
                 msg_type = msg[0]
                 if msg_type == "success":
                     _, lat, lon = msg
@@ -2275,6 +2275,7 @@ class App(tk.Tk):
         self._search_lon = lon
         self._update_coord_label()
         self._set_status("Searching…")
+        self._search_cancellation_token = CancellationToken()
         self._start_progress()
         self._search_btn.config(state="disabled")
 
@@ -2286,6 +2287,7 @@ class App(tk.Tk):
             on_success=lambda results: self.after(0, lambda: self._on_search_success(results)),
             on_error=lambda msg: self.after(0, lambda: self._on_search_error(msg)),
             on_progress=lambda msg: self.after(0, lambda: self._set_status(msg)),
+            cancellation_token=self._search_cancellation_token,
         )
 
     def _on_search_success(self, raw_results: list[dict]):
@@ -3264,9 +3266,19 @@ class App(tk.Tk):
 
     def _start_progress(self):
         self._progress.start(10)
+        self._cancel_btn.pack(side="right", padx=(0, 6))
 
     def _stop_progress(self):
         self._progress.stop()
+        self._cancel_btn.pack_forget()
+
+    def _on_cancel_search(self):
+        """Cancel the active search/geocode operation."""
+        if self._search_cancellation_token:
+            self._search_cancellation_token.cancel()
+        self._stop_progress()
+        self._search_btn.config(state="normal")
+        self._set_status("Search cancelled.")
 
     # ------------------------------------------------------------------
     # Close

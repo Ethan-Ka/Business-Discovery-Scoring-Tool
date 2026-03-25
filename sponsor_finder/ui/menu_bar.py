@@ -499,6 +499,13 @@ def _toggle_compact_rows(app):
         app._set_status("Compact rows off.")
 
 
+def _toggle_dark_mode(app):
+    """Switch between light and dark mode and persist the preference."""
+    dark = app._dark_mode_var.get()
+    if hasattr(app, "_apply_theme"):
+        app._apply_theme(dark)
+
+
 def _zoom_in(app):
     global _zoom_level
     _zoom_level = min(_zoom_level + 1, 5)
@@ -532,6 +539,16 @@ def _apply_zoom(app):
 
 def _build_view_menu(menu, app):
     """View menu: Toggle sidebar/pane, Columns, Zoom, Score filters"""
+
+    # Dark mode toggle — checkbutton that mirrors app._dark_mode_var
+    app._dark_mode_var = tk.BooleanVar(value=getattr(app, "_dark_mode", False))
+    menu.add_checkbutton(
+        label="Dark Mode",
+        variable=app._dark_mode_var,
+        command=lambda: _toggle_dark_mode(app),
+    )
+
+    menu.add_separator()
 
     menu.add_command(label="Toggle filter sidebar",
                      command=lambda: _toggle_sidebar(app))
