@@ -138,7 +138,26 @@ def _chat_sync(prompt: str, timeout: int = 30) -> str:
                 max_tokens=500,
                 temperature=0.7,
             )
-            return response["choices"][0]["message"]["content"]
+            content = response["choices"][0]["message"].get("content", "")
+            if content and str(content).strip():
+                return str(content)
+        except Exception:
+            pass
+
+        try:
+            completion_prompt = (
+                "You are a practical assistant. Respond clearly and briefly.\n\n"
+                f"{prompt}\n\nResponse:"
+            )
+            response = _llm_instance.create_completion(
+                prompt=completion_prompt,
+                max_tokens=500,
+                temperature=0.7,
+            )
+            text = response["choices"][0].get("text", "")
+            if text and str(text).strip():
+                return str(text)
+            raise RuntimeError("Model returned empty output")
         except Exception as e:
             raise RuntimeError(f"AI inference failed: {e}")
 

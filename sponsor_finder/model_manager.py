@@ -299,17 +299,32 @@ def load_model(model_name: str, ctx_limit: int = 2048, n_gpu_layers: int = 0):
 
     _debug = bool(os.environ.get("DEBUG"))
 
-    kwargs: dict = dict(
-        model_path=str(filepath),
-        n_ctx=ctx_limit,
-        n_gpu_layers=n_gpu_layers,
-        verbose=_debug,
-        n_threads=4,
-    )
-    if chat_format:
-        kwargs["chat_format"] = chat_format
+    context_candidates = [int(ctx_limit)]
+    for candidate in (1024, 512):
+        if candidate not in context_candidates and candidate < int(ctx_limit):
+            context_candidates.append(candidate)
 
-    return Llama(**kwargs)
+    last_error = None
+    for n_ctx in context_candidates:
+        kwargs: dict = dict(
+            model_path=str(filepath),
+            n_ctx=n_ctx,
+            n_gpu_layers=n_gpu_layers,
+            verbose=_debug,
+            n_threads=4,
+        )
+        if chat_format:
+            kwargs["chat_format"] = chat_format
+        try:
+            return Llama(**kwargs)
+        except Exception as e:
+            last_error = e
+
+    if last_error is not None:
+        raise RuntimeError(
+            f"Failed to load model '{model_name}' after context fallbacks: {last_error}"
+        )
+    raise RuntimeError(f"Failed to load model '{model_name}'")
 
 
 def download_model_async(

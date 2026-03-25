@@ -8,6 +8,14 @@ import shutil
 import sys
 
 
+def _is_packaged_runtime() -> bool:
+    """Return True when running from a packaged executable context."""
+    exe_name = os.path.basename(os.path.abspath(sys.executable)).lower()
+    return bool(getattr(sys, "frozen", False)) or (
+        exe_name.endswith(".exe") and exe_name not in ("python.exe", "pythonw.exe")
+    )
+
+
 def get_app_base_dir() -> str:
     """
     Return the base directory for app-local files.
@@ -114,9 +122,38 @@ def get_cache_path() -> str:
 
 
 def get_models_dir() -> str:
-    """Get path to models directory in app-local data folder."""
-    models_dir = os.path.join(get_data_dir(), "models")
+    """Get path to models directory in app-local data folder.
+
+    Runtime models are stored in a dedicated user-only directory to prevent
+    packaged/bundled model files from being auto-detected.
+    """
+    data_dir = get_data_dir()
+    models_dir = os.path.join(data_dir, "user_models")
     os.makedirs(models_dir, exist_ok=True)
+
+    legacy_models_dir = os.path.join(data_dir, "models")
+    if not _is_packaged_runtime() and os.path.isdir(legacy_models_dir):
+        try:
+            has_new_models = any(
+                name.lower().endswith(".gguf")
+                for name in os.listdir(models_dir)
+            )
+        except OSError:
+            has_new_models = False
+
+        if not has_new_models:
+            for filename in os.listdir(legacy_models_dir):
+                if not filename.lower().endswith(".gguf"):
+                    continue
+                src = os.path.join(legacy_models_dir, filename)
+                dst = os.path.join(models_dir, filename)
+                if os.path.exists(dst):
+                    continue
+                try:
+                    shutil.copy2(src, dst)
+                except OSError:
+                    continue
+
     return models_dir
 
 

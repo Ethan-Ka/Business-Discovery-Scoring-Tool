@@ -85,8 +85,8 @@ Downloaded from HuggingFace only when you first enable AI scoring. Choose one:
 
 Models are cached locally in the app data folder:
 
-- Windows EXE: `<exe folder>\data\models\`
-- Source/dev run: `<project root>\data\models\`
+- Windows EXE: `<exe folder>\data\user_models\`
+- Source/dev run: `<project root>\data\user_models\`
 
 Once downloaded, models are reused and never re-downloaded unless deleted.
 
@@ -118,7 +118,7 @@ If you want to use AI:
 - Then: `python sponsor_finder/main.py`
 
 **If using .exe:**
-- Try deleting `<exe folder>\data\models\` to clear cached AI files
+- Try deleting `<exe folder>\data\user_models\` to clear cached AI files
 - Then restart the app
 
 ### Performance Issues
@@ -138,7 +138,7 @@ If you want to reclaim disk space:
 
 **Windows:**
 1. Open File Explorer
-2. Navigate to: `<exe folder>\data\models\`
+2. Navigate to: `<exe folder>\data\user_models\`
 3. Delete the `.gguf` model files
 
 **macOS/Linux:**
