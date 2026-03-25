@@ -267,6 +267,119 @@ AUDIENCE_MAP = {
 
 DEFAULT_AUDIENCE = "General public"
 
+# ── Industry tier classification ──────────────────────────────────────────
+# "primary"  — directly automotive / car-culture relevant
+# "secondary" — enthusiast-adjacent (food, lifestyle, apparel, etc.)
+# "excluded" — never relevant as car meet sponsors (medical, legal, finance…)
+# "other"    — everything else (neutral)
+
+_EXCLUDED_INDUSTRIES = {
+    "Medical", "Dentist", "Pharmacy", "Hospital", "Optician", "Spa", "Massage",
+    "Bank", "ATM", "Insurance", "Real Estate", "Travel Agency", "Law Office",
+    "Post Office", "Accounting", "Financial Services", "Engineering",
+    "Dry Cleaning", "Laundry", "Storage", "Warehouse", "IT Company",
+    "Florist", "Bookstore", "Toy Store",
+}
+
+_PRIMARY_INDUSTRIES = {
+    "Automotive Shop", "Auto Parts", "Auto Detailing", "Auto Wrap Shop",
+    "Auto Body Shop", "Tire Shop", "Wheel/Tire Shop", "Tint Shop",
+    "Car Wash", "Performance Shop", "Car Dealership", "Motorcycle Shop",
+    "Go-Kart Track", "Vehicle Inspection", "Car Rental", "Gas Station",
+    "Motorsports Shop",
+}
+
+_SECONDARY_INDUSTRIES = {
+    "Gym", "Sporting Goods", "Outdoor/Sports Store", "Sports",
+    "Tattoo Parlor", "Barber", "Electronics", "Arcade", "Bowling Alley",
+    "Restaurant", "Cafe", "Bar", "Brewery", "Nightclub",
+    "Print Shop", "Sign Shop", "Photography", "Watch Store",
+    "Jewelry", "Clothing Store", "Fast Food", "Pizza", "Bakery",
+    "Convenience Store", "Hair Salon",
+}
+
+# Keywords whose presence in a business name signals automotive relevance
+_CAR_NAME_KEYWORDS = {
+    "auto", "automotive", "car", "cars", "vehicle", "motor", "motors",
+    "tire", "tires", "tyre", "tyres", "wheel", "wheels", "rim", "rims",
+    "detail", "detailing", "wash", "wax", "wrap", "vinyl", "tint",
+    "performance", "racing", "speed", "tuning", "dyno", "drift", "stance",
+    "mechanic", "repair", "body shop", "collision",
+    "lube", "oil change", "muffler", "exhaust", "brake", "transmission",
+    "jdm", "euro", "muscle", "sport", "turbo", "supercar", "supercharged",
+    "pit", "track", "autocross", "karting", "kart",
+}
+
+# Social media tag keys (also referenced in scoring.py — keep in sync)
+_SOCIAL_MEDIA_KEYS = {
+    "contact:facebook", "facebook",
+    "contact:instagram", "instagram",
+    "contact:twitter", "twitter",
+    "contact:youtube", "youtube",
+    "contact:tiktok", "tiktok",
+}
+
+
+def get_industry_relevance_tier(industry: str) -> str:
+    """Classify an industry label into a broad relevance tier.
+
+    Returns one of: "primary", "secondary", "excluded", "other"
+    """
+    if industry in _EXCLUDED_INDUSTRIES:
+        return "excluded"
+    if industry in _PRIMARY_INDUSTRIES:
+        return "primary"
+    if industry in _SECONDARY_INDUSTRIES:
+        return "secondary"
+    return "other"
+
+
+def name_has_car_keywords(name: str) -> bool:
+    """Return True if the business name contains automotive-relevant keywords."""
+    name_lower = name.lower()
+    return any(kw in name_lower for kw in _CAR_NAME_KEYWORDS)
+
+
+def build_audience_overlap(industry: str, tags: dict, name: str) -> str:
+    """Build a richer audience description by combining industry, name, and OSM tags.
+
+    The result is a comma-joined string of audience descriptors; profile rules that
+    use `audience_overlap contains "car"` will fire when any automotive signal is found.
+    """
+    parts: list[str] = []
+
+    # Base audience from industry map
+    base = AUDIENCE_MAP.get(industry, DEFAULT_AUDIENCE)
+    parts.append(base)
+
+    # Business name automotive signals
+    name_lower = name.lower()
+    if any(kw in name_lower for kw in {"car", "auto", "motor", "racing", "tuning",
+                                        "wheel", "tire", "tyre", "drift", "performance",
+                                        "mechanic", "detailing", "wrap", "vinyl", "tint"}):
+        if "car enthusiasts" not in base.lower():
+            parts.append("car enthusiasts")
+        if "automotive" not in base.lower():
+            parts.append("automotive community")
+
+    # OSM description / cuisine tags
+    text = (tags.get("description", "") + " " + tags.get("cuisine", "")).lower()
+    if any(kw in text for kw in {"car", "auto", "vehicle", "motorsport", "racing"}):
+        if "car enthusiasts" not in " ".join(parts).lower():
+            parts.append("car enthusiasts")
+
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for p in parts:
+        key = p.lower().strip()
+        if key and key not in seen:
+            seen.add(key)
+            deduped.append(p)
+
+    return ", ".join(deduped)
+
+
 # ---------------------------------------------------------------------------
 # OSM category (primary key label)
 # ---------------------------------------------------------------------------
@@ -366,8 +479,17 @@ def enrich(business: dict, frequency_chain_set: set | None = None) -> dict:
     business["industry"] = industry
     business["is_chain"] = chain
     business["target_audience"] = audience
-    business["audience_overlap"] = audience
+    # Richer audience overlap incorporating name and description signals
+    audience_overlap = build_audience_overlap(industry, tags, business.get("name", ""))
+    business["audience_overlap"] = audience_overlap
     business["establishment_status"] = status
+
+    # Additional data-point fields for profile scoring
+    business["industry_relevance_tier"] = get_industry_relevance_tier(industry)
+    business["name_has_car_keywords"] = name_has_car_keywords(business.get("name", ""))
+    business["has_social_media"] = any(
+        str(tags.get(k, "")).strip() for k in _SOCIAL_MEDIA_KEYS
+    )
     business["distance_mi"] = business.get("distance_miles", 0.0)
 
     phone = tags.get("phone") or tags.get("contact:phone") or business.get("phone", "")

@@ -1,0 +1,27 @@
+{
+  "saved_location": {
+    "address": "",
+    "lat": null,
+    "lon": null
+  },
+  "window": {
+    "width": 1378,
+    "height": 812,
+    "x": 78,
+    "y": 63
+  },
+  "last_radius_miles": 12.555555555555555,
+  "last_max_results": 1000,
+  "ai_settings": {
+    "model": "orca-mini-3b-gguf2-q4_0.gguf",
+    "weight": 0.5,
+    "explain_on": true,
+    "scoring_on": false,
+    "max_score": 50,
+    "disable_max_limit": true
+  },
+  "saved_pin": {
+    "lat": 33.06119127862902,
+    "lon": -97.09207140742048
+  }
+}

@@ -12,7 +12,7 @@ OVERPASS_MIRRORS = [
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass.openstreetmap.ru/api/interpreter",
 ]
-MAX_RESULTS = 1000
+MAX_RESULTS = 2000
 QUERY_TIMEOUT = 60   # seconds granted to the Overpass server for query execution
 REQUEST_TIMEOUT = 68  # socket deadline — must exceed QUERY_TIMEOUT so server error arrives
 

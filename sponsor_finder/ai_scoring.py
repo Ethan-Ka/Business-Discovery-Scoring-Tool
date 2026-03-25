@@ -11,6 +11,7 @@ Two modes:
   2. AI Score Mode     — batch 0-100 scores across all results, combined with rule score
 """
 
+import atexit
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -28,13 +29,40 @@ DEFAULT_MODEL = "llama3"
 # Session caches — never re-query a business already processed this session
 _explanation_cache: dict[str, str] = {}  # osm_id → explanation text
 _ai_score_cache: dict[str, dict] = {}  # osm_id → {ai_score, reason}
+_attribute_cache: dict[tuple, bool] = {}  # (osm_id, query) → bool
 
 # Global LLM instance (loaded once, reused for all inferences)
 _llm_instance = None
 _current_model_name = None
 
-# Thread pool for async requests (prevents UI freeze)
-_executor = ThreadPoolExecutor(max_workers=2)
+# Thread pool for async requests (prevents UI freeze).
+# max_workers=1 serialises all inference — llama-cpp-python's Llama is NOT
+# thread-safe; concurrent calls into the same instance segfault the process.
+_executor = ThreadPoolExecutor(max_workers=1)
+
+# Belt-and-suspenders lock: guarantees serial LLM access even if callers
+# bypass the executor and call _chat_sync directly.
+_inference_lock = threading.Lock()
+
+
+def _shutdown_cleanup() -> None:
+    """
+    Explicitly close the LLM before Python tears down module globals.
+    Registered with atexit so it runs before __del__ would fire during
+    interpreter shutdown — prevents the 'NoneType not callable' error
+    that occurs when llama_cpp._internals functions are cleared first.
+    """
+    global _llm_instance, _current_model_name
+    if _llm_instance is not None:
+        try:
+            _llm_instance.close()
+        except Exception:
+            pass
+        _llm_instance = None
+        _current_model_name = None
+
+
+atexit.register(_shutdown_cleanup)
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +110,11 @@ def load_default_model(model_name: str = DEFAULT_MODEL) -> bool:
 def unload_model() -> None:
     """Unload the current model from memory."""
     global _llm_instance, _current_model_name
+    if _llm_instance is not None:
+        try:
+            _llm_instance.close()
+        except Exception:
+            pass
     _llm_instance = None
     _current_model_name = None
 
@@ -98,15 +131,16 @@ def _chat_sync(prompt: str, timeout: int = 30) -> str:
     if _llm_instance is None:
         raise RuntimeError("No model loaded. Call load_default_model() first.")
 
-    try:
-        response = _llm_instance.create_chat_completion(
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=500,
-            temperature=0.7,
-        )
-        return response["choices"][0]["message"]["content"]
-    except Exception as e:
-        raise RuntimeError(f"AI inference failed: {e}")
+    with _inference_lock:
+        try:
+            response = _llm_instance.create_chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=500,
+                temperature=0.7,
+            )
+            return response["choices"][0]["message"]["content"]
+        except Exception as e:
+            raise RuntimeError(f"AI inference failed: {e}")
 
 
 def _chat(prompt: str, timeout: int = 30) -> str:
@@ -392,10 +426,66 @@ def compute_combined_score(rule_score: int, ai_score: int, ai_weight: float = 0.
     return max(0, min(100, round(rule_score * rule_weight + ai_score * ai_weight)))
 
 
+def check_attribute(business: dict, query: str) -> bool:
+    """
+    Ask the loaded LLM whether a business matches a natural-language attribute.
+    E.g. query = "has outdoor parking", "serves alcohol", "good for families".
+
+    Returns True if the model says yes, False otherwise.
+    Cached by (osm_id, normalized query) for the session.
+    """
+    if not is_model_loaded():
+        return False
+
+    osm_id = business.get("osm_id", "")
+    cache_key = (osm_id, query.strip().lower())
+    if cache_key in _attribute_cache:
+        return _attribute_cache[cache_key]
+
+    tags = business.get("tags", {}) or {}
+    # Build a compact tags summary, skipping address fields
+    skip = {"addr:housenumber", "addr:street", "addr:city", "addr:state",
+            "addr:postcode", "name"}
+    tag_parts = [f"{k}={v}" for k, v in list(tags.items())[:20] if k not in skip]
+    tags_str = ", ".join(tag_parts) if tag_parts else "none"
+
+    prompt = (
+        f"Business: {business.get('name', '')}\n"
+        f"Industry: {business.get('industry', '')}\n"
+        f"Category: {business.get('category', '')}\n"
+        f"OSM tags: {tags_str}\n\n"
+        f'Does this business likely have or offer: "{query}"?\n'
+        "Reply with ONLY the single word yes or no."
+    )
+
+    try:
+        # max_tokens=5 is enough for "yes"/"no" — keeps inference fast
+        with _inference_lock:
+            response = _llm_instance.create_chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=5,
+                temperature=0.0,
+            )
+        raw = response["choices"][0]["message"]["content"].strip().lower()
+        result = raw.startswith("yes")
+    except Exception:
+        result = False
+
+    if osm_id:
+        _attribute_cache[cache_key] = result
+    return result
+
+
+def clear_attribute_cache() -> None:
+    """Clear the AI attribute filter cache."""
+    _attribute_cache.clear()
+
+
 def clear_session_cache():
     """Clear all session caches (e.g. after a new search)."""
     _explanation_cache.clear()
     _ai_score_cache.clear()
+    _attribute_cache.clear()
 
 
 # ---------------------------------------------------------------------------

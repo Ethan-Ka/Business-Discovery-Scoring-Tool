@@ -28,26 +28,31 @@ OLLAMA_MODEL_REGISTRY = {
         "url": "https://gpt4all.io/models/gguf/Meta-Llama-3-8B-Instruct.Q4_0.gguf",
         "size_gb": 4.0,
         "description": "Meta Llama 3 8B Instruct (Q4) — recommended",
+        "chat_format": "llama-3",
     },
     "mistral": {
         "url": "https://gpt4all.io/models/gguf/mistral-7b-instruct-v0.1.Q4_0.gguf",
         "size_gb": 4.1,
         "description": "Mistral 7B Instruct (Q4) — strong reasoning",
+        "chat_format": "mistral-instruct",
     },
     "phi3": {
         "url": "https://gpt4all.io/models/gguf/Phi-3-mini-4k-instruct.Q4_0.gguf",
         "size_gb": 2.2,
         "description": "Microsoft Phi-3 Mini 4K Instruct (Q4) — efficient",
+        "chat_format": "chatml",
     },
     "orca-mini:3b": {
         "url": "https://gpt4all.io/models/gguf/orca-mini-3b-gguf2-q4_0.gguf",
         "size_gb": 2.0,
         "description": "Orca Mini 3B (Q4) — lightweight option",
+        "chat_format": "chatml",
     },
     "falcon": {
         "url": "https://gpt4all.io/models/gguf/gpt4all-falcon-newbpe-q4_0.gguf",
         "size_gb": 4.2,
         "description": "GPT4All Falcon 7B (Q4) — fast general-purpose",
+        "chat_format": "chatml",
     },
 
     # Backward-compat aliases to avoid breaking existing config values.
@@ -55,16 +60,19 @@ OLLAMA_MODEL_REGISTRY = {
         "url": "https://gpt4all.io/models/gguf/Meta-Llama-3-8B-Instruct.Q4_0.gguf",
         "size_gb": 4.0,
         "description": "Alias to llama3",
+        "chat_format": "llama-3",
     },
     "llama3.2:1b": {
         "url": "https://gpt4all.io/models/gguf/orca-mini-3b-gguf2-q4_0.gguf",
         "size_gb": 2.0,
         "description": "Alias to orca-mini:3b",
+        "chat_format": "chatml",
     },
     "gemma3:4b": {
         "url": "https://gpt4all.io/models/gguf/Phi-3-mini-4k-instruct.Q4_0.gguf",
         "size_gb": 2.2,
         "description": "Alias to phi3",
+        "chat_format": "chatml",
     },
 }
 
@@ -240,14 +248,16 @@ def delete_model(model_name: str) -> bool:
         return False
 
 
-def load_model(model_name: str, ctx_limit: int = 2048, n_gpu_layers: int = -1):
+def load_model(model_name: str, ctx_limit: int = 2048, n_gpu_layers: int = 0):
     """
     Load a model using llama-cpp-python.
 
     Args:
         model_name: Model name to load from cache
         ctx_limit: Context window size (tokens)
-        n_gpu_layers: Number of layers to offload to GPU (-1 = auto detect)
+        n_gpu_layers: GPU layers to offload (0 = CPU-only; -1 = auto-detect GPU)
+                      CPU-only is the safe default — GPU auto-detect can segfault
+                      on machines without a compatible CUDA/ROCm driver.
 
     Returns Llama instance, or None if model not found.
     Raises ImportError if llama-cpp-python not installed.
@@ -260,13 +270,22 @@ def load_model(model_name: str, ctx_limit: int = 2048, n_gpu_layers: int = -1):
     if not filepath.exists():
         raise FileNotFoundError(f"Model file not found: {filepath}")
 
-    return Llama(
+    info = get_model_info(model_name) or {}
+    chat_format = info.get("chat_format")
+
+    _debug = bool(os.environ.get("DEBUG"))
+
+    kwargs: dict = dict(
         model_path=str(filepath),
         n_ctx=ctx_limit,
         n_gpu_layers=n_gpu_layers,
-        verbose=False,
+        verbose=_debug,
         n_threads=4,
     )
+    if chat_format:
+        kwargs["chat_format"] = chat_format
+
+    return Llama(**kwargs)
 
 
 def download_model_async(

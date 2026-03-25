@@ -116,6 +116,8 @@ SPECIFIC_RULE_FIELDS = {
     "target_audience",
     "entity_type",
     "parent_company",
+    "industry_relevance_tier",
+    "name_has_car_keywords",
 }
 
 GENERIC_RULE_FIELDS = {
@@ -124,6 +126,7 @@ GENERIC_RULE_FIELDS = {
     "has_email",
     "has_phone",
     "has_opening_hours",
+    "has_social_media",
     "osm_completeness",
     "distance_mi",
     "distance_miles",
@@ -277,6 +280,12 @@ def _get_business_value(business: dict, field: str) -> Any:
         return bool(tags.get("email") or tags.get("contact:email") or business.get("email"))
     if field == "has_opening_hours":
         return bool(tags.get("opening_hours") or business.get("opening_hours"))
+    if field == "has_social_media":
+        return business.get("has_social_media", False)
+    if field == "industry_relevance_tier":
+        return business.get("industry_relevance_tier", "other")
+    if field == "name_has_car_keywords":
+        return business.get("name_has_car_keywords", False)
     if field == "osm_completeness":
         return _compute_osm_completeness(tags, business)
     if field == "chain_confidence":
@@ -455,7 +464,7 @@ def _compute_rule_based_score(business: dict, rules: list[dict], profile: dict |
         value = rule.get("value")
         points = int(rule.get("points", 0) or 0)
 
-        if not field or not operator or points <= 0:
+        if not field or not operator or points == 0:
             continue
 
         field_value = _get_business_value(business, field)
@@ -467,8 +476,9 @@ def _compute_rule_based_score(business: dict, rules: list[dict], profile: dict |
 
             awarded = points
             scaled = False
-            if require_relevance and is_generic and not relevance_matched:
-                awarded = max(1, round(points * fallback_scale))
+            # Negative penalty rules always apply as written — never scale them.
+            if points > 0 and require_relevance and is_generic and not relevance_matched:
+                awarded = round(points * fallback_scale)  # no artificial floor
                 scaled = awarded != points
 
             if field in ("distance_mi", "distance_miles"):

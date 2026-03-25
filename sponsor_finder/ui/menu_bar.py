@@ -65,9 +65,9 @@ def build_menu_bar(parent, app_instance):
     return menubar
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # FILE MENU
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 def _build_file_menu(menu, app):
     """File menu: New Session, Open/Save results, Export options, Settings, Exit"""
@@ -116,7 +116,7 @@ def _new_session(app):
     app._search_lon = None
     app._addr_var.set("")
     app._reset_filters()
-    app._populate_tree()
+    app._apply_filters()
     app._set_status("New session created.")
 
 
@@ -133,20 +133,47 @@ def _open_results(app):
         with open(path, "r") as f:
             data = json.load(f)
 
-        # Simple session format: list of businesses
+        # Legacy format: bare list of businesses
         if isinstance(data, list):
             app._all_businesses = data
-            app._populate_tree()
+            app._apply_filters()
             app._set_status(f"Loaded {len(data)} results from {os.path.basename(path)}")
-        else:
-            messagebox.showerror("Invalid Format",
-                                "Session file must contain a JSON array of businesses.")
+            return
+
+        if not isinstance(data, dict):
+            messagebox.showerror("Invalid Format", "Unrecognised session file format.")
+            return
+
+        businesses = data.get("businesses", [])
+        app._all_businesses = businesses
+
+        notes = data.get("notes")
+        if isinstance(notes, dict):
+            app._notes.update(notes)
+
+        shortlist = data.get("shortlist")
+        if isinstance(shortlist, list):
+            app._shortlist = set(shortlist)
+
+        filter_state = data.get("filter_state")
+        if isinstance(filter_state, dict):
+            old_on_change = app._sidebar.on_change
+            app._sidebar.on_change = lambda: None
+            try:
+                app._sidebar.set_state(filter_state)
+            finally:
+                app._sidebar.on_change = old_on_change
+
+        app._apply_filters()
+        app._set_status(
+            f"Loaded {len(businesses)} results from {os.path.basename(path)}"
+        )
     except Exception as e:
         messagebox.showerror("Error", f"Failed to load session: {e}")
 
 
 def _save_session(app):
-    """Save current results + notes + filters to a JSON session file."""
+    """Save current results + notes + shortlist + filters to a JSON session file."""
     path = filedialog.asksaveasfilename(
         defaultextension=".json",
         filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
@@ -158,8 +185,11 @@ def _save_session(app):
 
     try:
         session_data = {
+            "_version": 2,
             "businesses": app._all_businesses,
             "notes": app._notes,
+            "shortlist": sorted(app._shortlist),
+            "filter_state": app._sidebar.get_state(),
         }
         with open(path, "w") as f:
             json.dump(session_data, f, indent=2)
@@ -225,7 +255,7 @@ def _export_session_report(app):
     for i, b in enumerate(sorted_businesses[:10], 1):
         report += f"{i}. {b.get('name', 'Unknown')} - Score: {b.get('score', 0)}/100\n"
         if b.get("osm_id", "") in app._shortlist:
-            report += "   [✓ Shortlisted]\n"
+            report += "   [shortlisted]\n"
 
     # Save report
     path = filedialog.asksaveasfilename(
@@ -246,14 +276,14 @@ def _export_session_report(app):
 
 
 def _show_settings(app):
-    """Open Settings dialog (API keys, AI settings, data sources)."""
-    if hasattr(app, '_open_ai_settings'):
-        app._open_ai_settings()
+    """Open the unified Settings dialog."""
+    if hasattr(app, "_open_settings"):
+        app._open_settings()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # EDIT MENU
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 def _build_edit_menu(menu, app):
     """Edit menu: Select/Deselect, Copy options, Clear actions"""
@@ -264,6 +294,11 @@ def _build_edit_menu(menu, app):
                      command=lambda: _deselect_all(app))
     menu.add_command(label="Invert selection",
                      command=lambda: _invert_selection(app))
+
+    menu.add_separator()
+
+    menu.add_command(label="Compare selected (2–6)...",
+                     command=lambda: _compare_selected(app))
 
     menu.add_separator()
 
@@ -284,18 +319,30 @@ def _build_edit_menu(menu, app):
                      command=lambda: _clear_entity_cache(app))
 
 
+def _compare_selected(app):
+    """Open side-by-side comparison for tree-selected businesses."""
+    sel = app._tree.selection()
+    if len(sel) < 2:
+        messagebox.showinfo("Compare", "Select 2–6 rows in the table first (Ctrl+click).")
+        return
+    if len(sel) > 6:
+        messagebox.showinfo("Compare", "Please select at most 6 businesses to compare.")
+        return
+    app._open_compare(sel)
+
+
 def _select_all(app):
     """Check all shortlist checkboxes."""
     for b in app._all_businesses:
         app._shortlist.add(b.get("osm_id", ""))
-    app._populate_tree()
+    app._apply_filters()
     app._set_status(f"Selected all {len(app._all_businesses)} businesses.")
 
 
 def _deselect_all(app):
     """Uncheck all shortlist checkboxes."""
     app._shortlist.clear()
-    app._populate_tree()
+    app._apply_filters()
     app._set_status("Deselected all businesses.")
 
 
@@ -303,7 +350,7 @@ def _invert_selection(app):
     """Invert the shortlist selection."""
     all_ids = set(b.get("osm_id", "") for b in app._all_businesses if b.get("osm_id", ""))
     app._shortlist = all_ids - app._shortlist
-    app._populate_tree()
+    app._apply_filters()
     app._set_status(f"Inverted selection: {len(app._shortlist)} now selected.")
 
 
@@ -386,9 +433,102 @@ def _clear_entity_cache(app):
         messagebox.showerror("Error", f"Failed to clear cache: {e}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # VIEW MENU
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+
+_zoom_level = 0
+
+
+def _show_columns_dialog(app):
+    dlg = tk.Toplevel(app)
+    dlg.title("Column Visibility")
+    dlg.resizable(False, False)
+    dlg.grab_set()
+    ttk.Label(dlg, text="Show/hide columns:", font=("", 9, "bold")).pack(anchor="w", padx=10, pady=(10, 4))
+
+    col_defs = [
+        ("score", "Score"), ("name", "Name"), ("category", "Category"),
+        ("industry", "Industry"), ("chain", "Chain?"),
+        ("distance", "Dist (mi)"), ("phone", "Phone"), ("website", "Website"),
+    ]
+    default_widths = {"score": 55, "name": 200, "category": 110, "industry": 110,
+                      "chain": 55, "distance": 70, "phone": 120, "website": 160}
+
+    col_vars = {}
+    for col_id, col_label in col_defs:
+        try:
+            w = app._tree.column(col_id, "width")
+            visible = w > 0
+        except Exception:
+            visible = True
+        var = tk.BooleanVar(value=visible)
+        col_vars[col_id] = var
+        ttk.Checkbutton(dlg, text=col_label, variable=var).pack(anchor="w", padx=16, pady=1)
+
+    def _apply():
+        for col_id, var in col_vars.items():
+            try:
+                if var.get():
+                    app._tree.column(col_id, width=default_widths.get(col_id, 100),
+                                     minwidth=30, stretch=True)
+                else:
+                    app._tree.column(col_id, width=0, minwidth=0, stretch=False)
+            except Exception:
+                pass
+        dlg.destroy()
+
+    btn = ttk.Frame(dlg)
+    btn.pack(fill="x", padx=10, pady=8)
+    ttk.Button(btn, text="Apply", command=_apply).pack(side="left", padx=4)
+    ttk.Button(btn, text="Cancel", command=dlg.destroy).pack(side="left")
+
+
+def _toggle_compact_rows(app):
+    style = ttk.Style()
+    try:
+        current = style.lookup("Treeview", "rowheight")
+        current = int(current) if current else 22
+    except Exception:
+        current = 22
+    if current > 20:
+        style.configure("Treeview", rowheight=16)
+        app._set_status("Compact rows on.")
+    else:
+        style.configure("Treeview", rowheight=22)
+        app._set_status("Compact rows off.")
+
+
+def _zoom_in(app):
+    global _zoom_level
+    _zoom_level = min(_zoom_level + 1, 5)
+    _apply_zoom(app)
+
+
+def _zoom_out(app):
+    global _zoom_level
+    _zoom_level = max(_zoom_level - 1, -3)
+    _apply_zoom(app)
+
+
+def _reset_zoom(app):
+    global _zoom_level
+    _zoom_level = 0
+    _apply_zoom(app)
+
+
+def _apply_zoom(app):
+    import tkinter.font as tkfont
+    base = 9
+    size = base + _zoom_level
+    for name in ("TkDefaultFont", "TkTextFont", "TkFixedFont", "TkMenuFont",
+                 "TkHeadingFont", "TkCaptionFont", "TkSmallCaptionFont"):
+        try:
+            tkfont.nametofont(name).configure(size=size)
+        except Exception:
+            pass
+    app._set_status(f"Zoom: font size {size}pt.")
+
 
 def _build_view_menu(menu, app):
     """View menu: Toggle sidebar/pane, Columns, Zoom, Score filters"""
@@ -401,11 +541,9 @@ def _build_view_menu(menu, app):
     menu.add_separator()
 
     menu.add_command(label="Columns...",
-                     command=lambda: messagebox.showinfo("TODO",
-                        "Column visibility dialog not yet implemented."))
+                     command=lambda: _show_columns_dialog(app))
     menu.add_command(label="Compact rows",
-                     command=lambda: messagebox.showinfo("TODO",
-                        "Row height toggle not yet implemented."))
+                     command=lambda: _toggle_compact_rows(app))
 
     menu.add_separator()
 
@@ -414,9 +552,9 @@ def _build_view_menu(menu, app):
     menu.add_cascade(label="Score filter", menu=score_menu)
     score_menu.add_command(label="All",
                           command=lambda: _filter_by_score(app, None))
-    score_menu.add_command(label="High (≥70)",
+    score_menu.add_command(label="High (>=70)",
                           command=lambda: _filter_by_score(app, 70))
-    score_menu.add_command(label="Medium (40–69)",
+    score_menu.add_command(label="Medium (40-69)",
                           command=lambda: _filter_by_score(app, 40))
     score_menu.add_command(label="Low (<40)",
                           command=lambda: _filter_by_score(app, 0))
@@ -424,14 +562,11 @@ def _build_view_menu(menu, app):
     menu.add_separator()
 
     menu.add_command(label="Zoom in",
-                     command=lambda: messagebox.showinfo("TODO",
-                        "Zoom in not yet implemented."))
+                     command=lambda: _zoom_in(app))
     menu.add_command(label="Zoom out",
-                     command=lambda: messagebox.showinfo("TODO",
-                        "Zoom out not yet implemented."))
+                     command=lambda: _zoom_out(app))
     menu.add_command(label="Reset zoom",
-                     command=lambda: messagebox.showinfo("TODO",
-                        "Reset zoom not yet implemented."))
+                     command=lambda: _reset_zoom(app))
 
 
 def _toggle_sidebar(app):
@@ -473,9 +608,9 @@ def _filter_by_score(app, min_score):
     app._apply_filters()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # SEARCH MENU
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 def _build_search_menu(menu, app):
     """Search menu: New search, Repeat last, Search settings, Clear cache"""
@@ -488,8 +623,7 @@ def _build_search_menu(menu, app):
     menu.add_separator()
 
     menu.add_command(label="Search settings...",
-                     command=lambda: messagebox.showinfo("TODO",
-                        "Search settings dialog not yet implemented."))
+                     command=lambda: _show_search_settings(app))
 
     menu.add_separator()
 
@@ -499,8 +633,8 @@ def _build_search_menu(menu, app):
 
 def _new_search(app):
     """Focus address field and select all text."""
-    app._addr_entry.focus()
-    app._addr_entry.select_range(0, tk.END)
+    app._loc_combo.focus()
+    app._loc_combo.select_range(0, tk.END)
 
 
 def _repeat_last_search(app):
@@ -516,13 +650,60 @@ def _clear_cached_results(app):
     """Clear all cached results."""
     app._all_businesses.clear()
     app._shortlist.clear()
-    app._populate_tree()
+    app._apply_filters()
     app._set_status("Cache cleared.")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+def _show_search_settings(app):
+    dlg = tk.Toplevel(app)
+    dlg.title("Search Settings")
+    dlg.resizable(False, False)
+    dlg.grab_set()
+
+    frm = ttk.Frame(dlg, padding=12)
+    frm.pack(fill="both", expand=True)
+
+    ttk.Label(frm, text="Max results (50-2000):").grid(row=0, column=0, sticky="w", pady=4)
+    max_var = tk.IntVar(value=getattr(app, "_max_results_limit", 250))
+    ttk.Spinbox(frm, from_=50, to=2000, increment=50,
+                textvariable=max_var, width=8).grid(row=0, column=1, padx=8, pady=4)
+
+    ttk.Label(frm, text="Search radius (mi):").grid(row=1, column=0, sticky="w", pady=4)
+    radius_var = tk.DoubleVar(value=getattr(app, "_search_radius", 5.0))
+    ttk.Spinbox(frm, from_=0.5, to=25.0, increment=0.5,
+                textvariable=radius_var, width=8, format="%.1f").grid(row=1, column=1, padx=8, pady=4)
+
+    def _apply():
+        try:
+            v = int(float(max_var.get()))
+            app._max_results_limit = max(50, min(2000, v))
+            if hasattr(app, "_max_results_var"):
+                app._max_results_var.set(app._max_results_limit)
+            if hasattr(app, "_max_results_label"):
+                app._max_results_label.config(text=str(app._max_results_limit))
+        except Exception:
+            pass
+        try:
+            r = float(radius_var.get())
+            app._search_radius = max(0.5, min(25.0, r))
+            if hasattr(app, "_radius_var"):
+                app._radius_var.set(app._search_radius)
+            if hasattr(app, "_radius_label"):
+                app._radius_label.config(text=f"{app._search_radius:.1f} mi")
+        except Exception:
+            pass
+        app._set_status("Search settings updated.")
+        dlg.destroy()
+
+    btn = ttk.Frame(frm)
+    btn.grid(row=2, column=0, columnspan=2, pady=(10, 0))
+    ttk.Button(btn, text="Apply", command=_apply).pack(side="left", padx=4)
+    ttk.Button(btn, text="Cancel", command=dlg.destroy).pack(side="left")
+
+
+# ---------------------------------------------------------------------------
 # PROFILES MENU
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 def _build_profiles_menu(menu, app):
     """Profiles menu: Active profile submenu, New/Edit/Clone/Manage, Import/Export"""
@@ -564,16 +745,26 @@ def _update_active_profile_submenu(menu, app):
     profiles = getattr(app, '_profiles', [])
     active = app._sidebar.profile_var.get() if hasattr(app, '_sidebar') else ""
 
+    # StringVar must be kept alive on the app object — if it's a local variable
+    # Python garbage-collects it after this function returns and the checkmark disappears.
+    if not hasattr(app, '_profile_menu_var'):
+        app._profile_menu_var = tk.StringVar()
+    app._profile_menu_var.set(active)
+
     for profile in profiles:
         name = profile.get("name", "Unnamed")
-        is_active = (name == active)
-        label = f"✓ {name}" if is_active else name
-        menu.add_command(label=label,
-                        command=lambda n=name: _switch_profile(app, n))
+        menu.add_radiobutton(
+            label=name,
+            variable=app._profile_menu_var,
+            value=name,
+            command=lambda n=name: _switch_profile(app, n),
+        )
 
 
 def _switch_profile(app, profile_name):
     """Switch to a different profile."""
+    if hasattr(app, '_profile_menu_var'):
+        app._profile_menu_var.set(profile_name)
     if hasattr(app, '_sidebar'):
         app._sidebar.profile_var.set(profile_name)
         if hasattr(app, '_on_profile_load'):
@@ -625,7 +816,22 @@ def _edit_active_profile(app):
 
 def _clone_active_profile(app):
     """Clone the active profile with ' (copy)' suffix."""
-    messagebox.showinfo("TODO", "Profile cloning not yet fully implemented.")
+    import copy
+    if not hasattr(app, "_sidebar") or not hasattr(app, "_profiles"):
+        return
+    active_name = app._sidebar.profile_var.get()
+    for p in app._profiles:
+        if p.get("name") == active_name:
+            clone = copy.deepcopy(p)
+            clone["name"] = f"{active_name} (copy)"
+            from profiles import upsert_profile, save_profiles
+            app._profiles = upsert_profile(app._profiles, clone)
+            save_profiles(app._profiles)
+            app._sidebar.update_profiles([x.get("name", "") for x in app._profiles])
+            app._sidebar.profile_var.set(clone["name"])
+            app._set_status(f"Cloned as '{clone['name']}'.")
+            return
+    messagebox.showinfo("No Profile", "No active profile to clone.")
 
 
 def _manage_profiles(app):
@@ -643,21 +849,19 @@ def _import_profile(app):
     )
     if not path:
         return
-
     try:
-        with open(path, "r") as f:
+        with open(path, "r", encoding="utf-8") as f:
             profile = json.load(f)
-
-        if "name" in profile:
-            from profiles import upsert_profile
-            upsert_profile(profile)
-            app._profiles.append(profile)
-            app._set_status(f"Imported profile: {profile['name']}")
-            if hasattr(app, '_active_profile_menu'):
-                _update_active_profile_submenu(app._active_profile_menu, app)
-        else:
-            messagebox.showerror("Invalid Profile",
-                                "File does not contain a valid profile.")
+        if not isinstance(profile, dict) or "name" not in profile:
+            messagebox.showerror("Invalid Profile", "File does not contain a valid profile.")
+            return
+        from profiles import upsert_profile, save_profiles
+        app._profiles = upsert_profile(app._profiles, profile)
+        save_profiles(app._profiles)
+        app._sidebar.update_profiles([p.get("name", "") for p in app._profiles])
+        app._set_status(f"Imported profile: {profile['name']}")
+        if hasattr(app, "_active_profile_menu"):
+            _update_active_profile_submenu(app._active_profile_menu, app)
     except Exception as e:
         messagebox.showerror("Error", f"Failed to import profile: {e}")
 
@@ -697,16 +901,15 @@ def _set_no_profile(app):
         app._set_status("Switched to neutral mode (no profile).")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # FILTERS MENU
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 def _build_filters_menu(menu, app):
     """Filters menu: Save/Load, Custom filter, Reset options"""
 
     menu.add_command(label="Save current filters as...",
-                     command=lambda: messagebox.showinfo("TODO",
-                        "Save filters dialog not yet implemented."))
+                     command=lambda: app._sidebar._save_search() if hasattr(app, "_sidebar") else None)
 
     # Load saved filter submenu
     load_menu = tk.Menu(menu, tearoff=False)
@@ -717,8 +920,7 @@ def _build_filters_menu(menu, app):
     menu.add_separator()
 
     menu.add_command(label="Build custom filter...",
-                     command=lambda: messagebox.showinfo("TODO",
-                        "Custom filter builder not yet fully implemented."))
+                     command=lambda: app._sidebar._open_custom_filter() if hasattr(app, "_sidebar") else None)
     menu.add_command(label="Clear custom filter",
                      command=lambda: _clear_custom_filter(app))
 
@@ -740,16 +942,22 @@ def _build_filters_menu(menu, app):
                           command=lambda: _quick_filter_contact(app))
     quick_menu.add_command(label="Fully contactable (phone AND email AND website)",
                           command=lambda: _quick_filter_fully_contactable(app))
-    quick_menu.add_command(label="High OSM completeness (≥70%)",
+    quick_menu.add_command(label="High OSM completeness (>=70%)",
                           command=lambda: _quick_filter_osm_complete(app))
     quick_menu.add_command(label="Within 2 miles",
                           command=lambda: _quick_filter_distance(app))
-    quick_menu.add_command(label="Score ≥70",
+    quick_menu.add_command(label="Score >=70",
                           command=lambda: _quick_filter_high_score(app))
 
 
 def _clear_custom_filter(app):
     """Clear any active custom filter."""
+    if hasattr(app, "_sidebar"):
+        app._sidebar._custom_rules = []
+        app._sidebar._custom_combine = "AND"
+        if hasattr(app._sidebar, "custom_filter_label"):
+            app._sidebar.custom_filter_label.config(text="")
+        app._apply_filters()
     app._set_status("Custom filter cleared.")
 
 
@@ -770,47 +978,87 @@ def _reset_all_filters(app):
 def _quick_filter_local(app):
     """Filter to local businesses only (is_chain = false)."""
     if hasattr(app, '_sidebar'):
-        # This would set the "Hide chains" checkbox
-        app._set_status("Filtered to local businesses only.")
+        app._sidebar.hide_chains_var.set(True)
+        app._apply_filters()
+        app._set_status("Quick filter: local businesses only.")
 
 
 def _quick_filter_contact(app):
-    """Filter businesses with contact info."""
-    app._set_status("Filtered to businesses with contact info.")
+    """Filter businesses with contact info (phone OR website)."""
+    if hasattr(app, '_sidebar'):
+        rules = [
+            {"field": "Has Phone",   "operator": "=", "value": "True"},
+            {"field": "Has Website", "operator": "=", "value": "True"},
+        ]
+        app._sidebar._custom_rules = rules
+        app._sidebar._custom_combine = "OR"
+        if hasattr(app._sidebar, "custom_filter_label"):
+            app._sidebar.custom_filter_label.config(text="2 rules active (OR)")
+        app._apply_filters()
+        app._set_status("Quick filter: has contact info.")
 
 
 def _quick_filter_fully_contactable(app):
-    """Filter to fully contactable businesses."""
-    app._set_status("Filtered to fully contactable businesses.")
+    """Filter to fully contactable businesses (phone AND website)."""
+    if hasattr(app, '_sidebar'):
+        rules = [
+            {"field": "Has Phone",   "operator": "=", "value": "True"},
+            {"field": "Has Website", "operator": "=", "value": "True"},
+        ]
+        app._sidebar._custom_rules = rules
+        app._sidebar._custom_combine = "AND"
+        if hasattr(app._sidebar, "custom_filter_label"):
+            app._sidebar.custom_filter_label.config(text="2 rules active (AND)")
+        app._apply_filters()
+        app._set_status("Quick filter: fully contactable.")
 
 
 def _quick_filter_osm_complete(app):
-    """Filter by high OSM completeness."""
-    app._set_status("Filtered to high OSM completeness (≥70%).")
+    """Sort by OSM completeness (highest first)."""
+    if hasattr(app, '_sidebar'):
+        app._sidebar._custom_rules = []
+        app._sidebar._custom_combine = "AND"
+        if hasattr(app._sidebar, "custom_filter_label"):
+            app._sidebar.custom_filter_label.config(text="")
+        app._sidebar.min_score_var.set(1)
+        if hasattr(app._sidebar, "min_score_label"):
+            app._sidebar.min_score_label.config(text="1")
+        app._sidebar.sort_var.set("Completeness")
+        app._apply_filters()
+        app._set_status("Sorted by OSM completeness (highest first).")
 
 
 def _quick_filter_distance(app):
     """Filter to within 2 miles."""
     if hasattr(app, '_sidebar'):
-        app._set_status("Filtered to businesses within 2 miles.")
+        rules = [{"field": "Distance", "operator": "<", "value": "2"}]
+        app._sidebar._custom_rules = rules
+        app._sidebar._custom_combine = "AND"
+        if hasattr(app._sidebar, "custom_filter_label"):
+            app._sidebar.custom_filter_label.config(text="1 rule active (AND)")
+        app._apply_filters()
+        app._set_status("Quick filter: within 2 miles.")
 
 
 def _quick_filter_high_score(app):
-    """Filter to high-scoring businesses."""
+    """Filter to high-scoring businesses (score >= 70)."""
     if hasattr(app, '_sidebar'):
-        app._set_status("Filtered to businesses with score ≥70.")
+        app._sidebar.min_score_var.set(70)
+        if hasattr(app._sidebar, "min_score_label"):
+            app._sidebar.min_score_label.config(text="70")
+        app._apply_filters()
+        app._set_status("Quick filter: score >=70.")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # TOOLS MENU
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 def _build_tools_menu(menu, app):
     """Tools menu: AI Scoring, Data sources, File management, Diagnostics"""
 
     menu.add_command(label="AI Scoring",
-                     command=lambda: messagebox.showinfo("TODO",
-                        "AI Scoring toggle not yet fully wired."))
+                     command=lambda: _toggle_ai_scoring(app))
     menu.add_command(label="Run AI score on all results...",
                      command=lambda: _run_ai_score_all(app))
     menu.add_command(label="Clear AI scores",
@@ -819,8 +1067,7 @@ def _build_tools_menu(menu, app):
     menu.add_separator()
 
     menu.add_command(label="Manage data sources...",
-                     command=lambda: messagebox.showinfo("TODO",
-                        "Data source manager not yet fully implemented."))
+                     command=lambda: _manage_data_sources(app))
 
     menu.add_separator()
 
@@ -835,6 +1082,73 @@ def _build_tools_menu(menu, app):
 
     menu.add_command(label="Run diagnostics",
                      command=lambda: _run_diagnostics(app))
+
+
+def _toggle_ai_scoring(app):
+    if not hasattr(app, "_sidebar"):
+        return
+    new_val = not app._sidebar.ai_scoring_var.get()
+    app._sidebar.ai_scoring_var.set(new_val)
+    app._set_status(f"AI scoring {'enabled' if new_val else 'disabled'}.")
+
+
+def _manage_data_sources(app):
+    dlg = tk.Toplevel(app)
+    dlg.title("Data Sources")
+    dlg.resizable(False, False)
+    dlg.grab_set()
+    dlg.geometry("420x320")
+
+    ttk.Label(dlg, text="Data Sources", font=("", 11, "bold")).pack(
+        anchor="w", padx=12, pady=(10, 4))
+
+    sources = [
+        ("OpenStreetMap / Overpass", "Core business data - always enabled", True),
+        ("Wikidata", "Chain detection & entity intelligence - always enabled", True),
+    ]
+    config = getattr(app, "_config", {})
+    api_keys = config.get("api_keys", {})
+
+    optional = [
+        ("Google Places", "Ratings, reviews, rich data", "google_places"),
+        ("Yelp Fusion", "Ratings, price level, review snippets", "yelp"),
+    ]
+
+    scroll_frame = ttk.Frame(dlg)
+    scroll_frame.pack(fill="both", expand=True, padx=12)
+
+    for name, desc, _ in sources:
+        row = ttk.LabelFrame(scroll_frame, text=name, padding=6)
+        row.pack(fill="x", pady=3)
+        ttk.Label(row, text=desc, foreground="#555").pack(anchor="w")
+        ttk.Label(row, text="Active", foreground="#27ae60").pack(anchor="w")
+
+    key_vars = {}
+    for name, desc, key in optional:
+        row = ttk.LabelFrame(scroll_frame, text=name, padding=6)
+        row.pack(fill="x", pady=3)
+        ttk.Label(row, text=desc, foreground="#555").pack(anchor="w")
+        key_row = ttk.Frame(row)
+        key_row.pack(fill="x")
+        ttk.Label(key_row, text="API Key:", width=9).pack(side="left")
+        var = tk.StringVar(value=api_keys.get(key, ""))
+        key_vars[key] = var
+        ttk.Entry(key_row, textvariable=var, show="*").pack(side="left", fill="x", expand=True)
+
+    def _save():
+        for key, var in key_vars.items():
+            if "api_keys" not in config:
+                config["api_keys"] = {}
+            config["api_keys"][key] = var.get().strip()
+        from export import save_config
+        save_config(config)
+        app._set_status("Data source settings saved.")
+        dlg.destroy()
+
+    btn = ttk.Frame(dlg)
+    btn.pack(fill="x", padx=12, pady=8)
+    ttk.Button(btn, text="Save", command=_save).pack(side="left", padx=4)
+    ttk.Button(btn, text="Close", command=dlg.destroy).pack(side="left")
 
 
 def _run_ai_score_all(app):
@@ -855,7 +1169,7 @@ def _clear_ai_scores(app):
         b.pop("ai_reason", None)
         b.pop("combined_score", None)
 
-    app._populate_tree()
+    app._apply_filters()
     app._set_status("AI scores cleared.")
 
 
@@ -891,46 +1205,49 @@ def _run_diagnostics(app):
 
     # AI model check
     ai_ready = ai_scoring.is_ai_ready()
-    diagnostics += f"✓ AI model loaded: {'Yes' if ai_ready else 'No'}\n"
+    diagnostics += f"AI model loaded: {'Yes' if ai_ready else 'No'}\n"
 
     # Overpass check
     try:
         from search import test_overpass
         overpass_ok = test_overpass()
-        diagnostics += f"✓ Overpass API: {'OK' if overpass_ok else 'Not responding'}\n"
-    except:
-        diagnostics += "✓ Overpass API: Connection status unknown\n"
+        diagnostics += f"Overpass API: {'OK' if overpass_ok else 'Not responding'}\n"
+    except Exception:
+        diagnostics += "Overpass API: Connection status unknown\n"
 
     # Geopy check
     try:
         from geopy.geocoders import Nominatim
         Nominatim(user_agent="business_finder")
-        diagnostics += "✓ Geopy/Nominatim: OK\n"
-    except:
-        diagnostics += "✓ Geopy/Nominatim: Not available\n"
+        diagnostics += "Geopy/Nominatim: OK\n"
+    except Exception:
+        diagnostics += "Geopy/Nominatim: Not available\n"
 
     # Data directory
     from paths import get_data_dir
     data_dir = get_data_dir()
-    diagnostics += f"\n✓ Data directory: {data_dir}\n"
-    diagnostics += f"✓ Results in memory: {len(app._all_businesses)}\n"
-    diagnostics += f"✓ Shortlisted: {len(app._shortlist)}\n"
-    diagnostics += f"✓ Notes saved: {len(app._notes)}\n"
+    diagnostics += f"\nData directory: {data_dir}\n"
+    diagnostics += f"Results in memory: {len(app._all_businesses)}\n"
+    diagnostics += f"Shortlisted: {len(app._shortlist)}\n"
+    diagnostics += f"Notes saved: {len(app._notes)}\n"
 
     # Show in dialog
     dlg = tk.Toplevel(app)
     dlg.title("Diagnostics Report")
-    dlg.geometry("500x300")
+    dlg.geometry("500x420")
+    dlg.minsize(400, 320)
 
+    # Pack button FIRST so it always gets its space before the text expands.
+    ttk.Button(dlg, text="Close", command=dlg.destroy).pack(side="bottom", pady=10)
     text_widget = tk.Text(dlg, wrap="word", padx=10, pady=10)
     text_widget.pack(fill="both", expand=True)
     text_widget.insert("1.0", diagnostics)
     text_widget.config(state="disabled")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # HELP MENU
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 def _build_help_menu(menu, app):
     """Help menu: Getting started, Keyboard shortcuts, About"""
@@ -946,49 +1263,50 @@ def _build_help_menu(menu, app):
 def _show_getting_started(app):
     """Show quickstart instructions."""
     msg = """
-Business Discovery & Scoring Tool — Quick Start Guide
+Business Discovery & Scoring Tool -- Quick Start Guide
 
 1. LOCATION
-   • Select a location mode (Address, Saved Location, or Drop a Pin)
-   • Enter an address or coordinates
-   • Set a search radius (0.5 – 25 miles)
+   - Select a location mode (Address, Saved Location, or Drop a Pin)
+   - Enter an address or coordinates
+   - Set a search radius (0.5 - 25 miles)
 
 2. SEARCH
-   • Click "Search" to fetch nearby businesses from OpenStreetMap
-   • Results appear in the table and are enriched with industry, chain status, etc.
+   - Click "Search" to fetch nearby businesses from OpenStreetMap
+   - Results appear in the table and are enriched with industry, chain status, etc.
 
 3. FILTER & SORT
-   • Use the left sidebar to filter by name, industry, score, distance, etc.
-   • Click column headers to sort results
-   • Use the detail pane (right) to view full information for a business
+   - Use the left sidebar to filter by name, industry, score, distance, etc.
+   - Click column headers to sort results
+   - Use the detail pane (right) to view full information for a business
 
 4. SHORTLIST & EXPORT
-   • Double-click rows to add/remove from your shortlist
-   • Edit notes for each business
-   • Click "Export" to save your shortlist as CSV
+   - Double-click rows to add/remove from your shortlist
+   - Edit notes for each business
+   - Click "Export" to save your shortlist as CSV
 
 5. PROFILES
-   • Create custom scoring profiles to tailor fit rules and filters
-   • Switch profiles in the top menu
-   • Profiles save your scoring rules, default filters, and export columns
+   - Create custom scoring profiles to tailor fit rules and filters
+   - Switch profiles in the top menu
+   - Profiles save your scoring rules, default filters, and export columns
 
 6. AI FEATURES (Optional)
-   • Download an AI model to enable AI insights for individual businesses
-   • Or run batch AI scoring to get AI-generated fit scores alongside rule-based scores
+   - Download an AI model to enable AI insights for individual businesses
+   - Or run batch AI scoring to get AI-generated fit scores alongside rule-based scores
 
 For more information, visit: https://github.com/anthropics/claude-code
     """
 
     dlg = tk.Toplevel(app)
     dlg.title("Getting Started")
-    dlg.geometry("600x400")
+    dlg.geometry("600x520")
+    dlg.minsize(500, 420)
 
+    # Pack button FIRST so it always gets its space before the text expands.
+    ttk.Button(dlg, text="Close", command=dlg.destroy).pack(side="bottom", pady=10)
     text_widget = tk.Text(dlg, wrap="word", padx=10, pady=10)
     text_widget.pack(fill="both", expand=True)
     text_widget.insert("1.0", msg.strip())
     text_widget.config(state="disabled")
-
-    ttk.Button(dlg, text="Close", command=dlg.destroy).pack(pady=10)
 
 
 def _show_keyboard_shortcuts(app):
@@ -1015,14 +1333,15 @@ Note: Some shortcuts may differ based on your platform.
 
     dlg = tk.Toplevel(app)
     dlg.title("Keyboard Shortcuts")
-    dlg.geometry("550x350")
+    dlg.geometry("560x460")
+    dlg.minsize(460, 380)
 
+    # Pack button FIRST so it always gets its space before the text expands.
+    ttk.Button(dlg, text="Close", command=dlg.destroy).pack(side="bottom", pady=10)
     text_widget = tk.Text(dlg, wrap="word", padx=10, pady=10)
     text_widget.pack(fill="both", expand=True)
     text_widget.insert("1.0", msg.strip())
     text_widget.config(state="disabled")
-
-    ttk.Button(dlg, text="Close", command=dlg.destroy).pack(pady=10)
 
 
 def _show_about(app):
@@ -1031,19 +1350,18 @@ def _show_about(app):
 Business Discovery & Scoring Tool
 Version 1.0.0
 
-A personal tool for finding and filtering local businesses
-as potential car meet sponsors.
+A personal tool for finding and filtering local businesses.
 
 Built with:
-• Python 3.x
-• Tkinter (standard library GUI)
-• OpenStreetMap / Overpass API
-• Wikidata
-• llama-cpp-python (optional, for local AI scoring)
+- Python 3.x
+- Tkinter (standard library GUI)
+- OpenStreetMap / Overpass API
+- Wikidata
+- llama-cpp-python (optional, for local AI scoring)
 
 License: GNU Affero General Public License v3
 
-© 2024 – Business Finder Contributors
+(c) 2026 - Ethan Kawley
     """
 
     messagebox.showinfo("About", msg.strip())

@@ -25,10 +25,15 @@ from export import (
     load_shortlist, save_shortlist,
     ensure_data_files_exist,
     export_shortlist_csv, default_export_filename,
+    load_history, save_history, append_history_entry,
+    load_saved_searches, save_saved_searches,
+    load_collections, save_collections,
+    export_json,
 )
 from profiles import load_profiles, save_profiles, get_profile, upsert_profile, delete_profile
-from paths import get_data_dir
+from paths import get_data_dir, get_tile_cache_path
 import ai_scoring
+import applog
 
 
 def is_windows() -> bool:
@@ -64,14 +69,13 @@ COL_WIDTHS = {
 # If a model is not loaded, app works fine without AI explanations and scoring.
 
 class CustomFilterDialog(tk.Toplevel):
-    FIELDS    = ["Score", "Category", "Chain", "Has Website", "Has Phone",
-                 "Distance", "Target Audience"]
-    OPERATORS = [">", "<", "=", "contains", "is not"]
+    from filters import CUSTOM_FIELDS as FIELDS, CUSTOM_OPERATORS as OPERATORS
 
     def __init__(self, parent, existing_rules=None, existing_combine="AND"):
         super().__init__(parent)
         self.title("Build Custom Filter")
-        self.resizable(True, False)
+        self.geometry("600x380")
+        self.resizable(True, True)
         self.grab_set()
 
         self.rules: list[dict] = list(existing_rules or [])
@@ -94,9 +98,29 @@ class CustomFilterDialog(tk.Toplevel):
             ttk.Radiobutton(top, text=val, variable=self.combine_var,
                             value=val).pack(side="left", padx=4)
 
-        # Rules container
-        self.rules_frame = ttk.Frame(frm)
-        self.rules_frame.pack(fill="x")
+        # Scrollable rules container
+        rules_outer = ttk.Frame(frm)
+        rules_outer.pack(fill="both", expand=True)
+        canvas = tk.Canvas(rules_outer, highlightthickness=0, bd=0, height=220)
+        vsb = ttk.Scrollbar(rules_outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        self.rules_frame = ttk.Frame(canvas)
+        self._rules_win = canvas.create_window((0, 0), window=self.rules_frame, anchor="nw")
+        self._rules_canvas = canvas
+
+        def _on_inner(*_):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        def _on_canvas(e):
+            canvas.itemconfigure(self._rules_win, width=e.width)
+        self.rules_frame.bind("<Configure>", _on_inner)
+        canvas.bind("<Configure>", _on_canvas)
+
+        def _mwheel(e):
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        canvas.bind("<Enter>", lambda _: canvas.bind_all("<MouseWheel>", _mwheel))
+        canvas.bind("<Leave>", lambda _: canvas.unbind_all("<MouseWheel>"))
 
         # Add rule button
         ttk.Button(frm, text="+ Add Rule", command=self._add_rule).pack(pady=6)
@@ -108,7 +132,7 @@ class CustomFilterDialog(tk.Toplevel):
         ttk.Button(btn_row, text="Cancel", command=self.destroy).pack(side="right")
 
     def _add_rule(self):
-        self.rules.append({"field": "Score", "operator": ">", "value": "50"})
+        self.rules.append({"field": "Score", "operator": ">=", "value": "50"})
         self._refresh_rules()
 
     def _refresh_rules(self):
@@ -134,9 +158,9 @@ class CustomFilterDialog(tk.Toplevel):
             val_var.trace_add("write", upd)
 
             ttk.Combobox(row, textvariable=field_var, values=self.FIELDS,
-                         width=14, state="readonly").pack(side="left", padx=2)
+                         width=20, state="readonly").pack(side="left", padx=2)
             ttk.Combobox(row, textvariable=op_var, values=self.OPERATORS,
-                         width=8, state="readonly").pack(side="left", padx=2)
+                         width=13, state="readonly").pack(side="left", padx=2)
             ttk.Entry(row, textvariable=val_var, width=14).pack(side="left", padx=2)
 
             idx = i
@@ -160,11 +184,12 @@ class CustomFilterDialog(tk.Toplevel):
 class AISettingsDialog(tk.Toplevel):
     def __init__(self, parent, current_model: str, current_weight: float,
                  explain_enabled: bool, score_enabled: bool, max_score: int,
-                 disable_max_limit: bool = True):
+                 disable_max_limit: bool = True, debug_mode: bool = False):
         super().__init__(parent)
         self.title("AI Settings — Local LLM Models")
+        self.geometry("480x540")
         self.resizable(True, False)
-        self.minsize(420, 0)
+        self.minsize(420, 500)
         self.grab_set()
 
         self.result_model    = current_model
@@ -173,6 +198,7 @@ class AISettingsDialog(tk.Toplevel):
         self.result_scoring  = score_enabled
         self.result_max      = max_score
         self.result_disable_max_limit = disable_max_limit
+        self.result_debug    = debug_mode
         self.confirmed       = False
 
         self._model_var    = tk.StringVar(value=current_model)
@@ -181,6 +207,7 @@ class AISettingsDialog(tk.Toplevel):
         self._score_var    = tk.BooleanVar(value=score_enabled)
         self._max_var      = tk.IntVar(value=max_score)
         self._disable_max_limit_var = tk.BooleanVar(value=disable_max_limit)
+        self._debug_var    = tk.BooleanVar(value=debug_mode)
         self._dl_model_var = tk.StringVar()
         self._pulling      = False
         self._pull_cancellation_token = None
@@ -260,13 +287,19 @@ class AISettingsDialog(tk.Toplevel):
         self._max_spinbox = ttk.Spinbox(
             max_row,
             from_=10,
-            to=200,
+            to=2000,
             increment=10,
             textvariable=self._max_var,
             width=6,
         )
         self._max_spinbox.pack(side="left", padx=6)
         self._sync_max_limit_state()
+
+        ttk.Separator(frm).pack(fill="x", pady=(10, 6))
+        ttk.Label(frm, text="Developer", font=("Segoe UI", 9, "bold"),
+                  foreground="#555").pack(anchor="w")
+        ttk.Checkbutton(frm, text="Debug mode  (verbose AI logs in console)",
+                        variable=self._debug_var).pack(anchor="w", pady=2)
 
     def _sync_max_limit_state(self):
         state = "disabled" if self._disable_max_limit_var.get() else "normal"
@@ -340,6 +373,21 @@ class AISettingsDialog(tk.Toplevel):
 
         def _run():
             ready = ai_scoring.is_ai_ready()
+            if not ready:
+                # Not loaded in memory — check if a model file exists on disk
+                # and try to load it (same logic as main window startup check).
+                models = ai_scoring.list_models()
+                if models:
+                    preferred = self._model_var.get()
+                    candidates = [preferred, ai_scoring.DEFAULT_MODEL] + models
+                    seen: set = set()
+                    for candidate in candidates:
+                        if not candidate or candidate in seen:
+                            continue
+                        seen.add(candidate)
+                        if ai_scoring.load_default_model(candidate):
+                            ready = True
+                            break
             q.put(ready)
 
         def _process():
@@ -561,6 +609,7 @@ class AISettingsDialog(tk.Toplevel):
         self.result_scoring = self._score_var.get()
         self.result_max     = int(self._max_var.get())
         self.result_disable_max_limit = self._disable_max_limit_var.get()
+        self.result_debug   = self._debug_var.get()
         self.confirmed      = True
         self.destroy()
 
@@ -723,7 +772,8 @@ class FilterSidebar(ttk.Frame):
     def __init__(self, parent, on_change,
                  on_profile_load=None, on_profile_save=None, on_profile_delete=None,
                  on_profile_new=None, on_profile_edit=None,
-                 on_ai_settings=None):
+                 on_ai_settings=None,
+                 on_save_search=None, on_delete_search=None, on_load_search=None):
         super().__init__(parent, width=SIDEBAR_W)
         self.on_change = on_change
         self._on_profile_load = on_profile_load
@@ -732,23 +782,45 @@ class FilterSidebar(ttk.Frame):
         self._on_profile_new = on_profile_new
         self._on_profile_edit = on_profile_edit
         self._on_ai_settings = on_ai_settings
+        self._on_save_search = on_save_search
+        self._on_delete_search = on_delete_search
+        self._on_load_search = on_load_search
+        self._saved_searches: list[dict] = []
         self._build_ui()
 
     def _build_ui(self):
+        # ── Scrollable container ──────────────────────────────────────────
+        self._canvas = tk.Canvas(self, highlightthickness=0, bd=0)
+        self._scrollbar = ttk.Scrollbar(self, orient="vertical",
+                                        command=self._canvas.yview)
+        self._canvas.configure(yscrollcommand=self._scrollbar.set)
+        self._scrollbar.pack(side="right", fill="y")
+        self._canvas.pack(side="left", fill="both", expand=True)
+
+        self._inner = ttk.Frame(self._canvas)
+        self._canvas_win = self._canvas.create_window(
+            (0, 0), window=self._inner, anchor="nw")
+
+        self._inner.bind("<Configure>", self._on_inner_configure)
+        self._canvas.bind("<Configure>", self._on_canvas_configure)
+        self._canvas.bind("<Enter>", lambda _: self._bind_mousewheel())
+        self._canvas.bind("<Leave>", lambda _: self._unbind_mousewheel())
+
+        f = self._inner   # shorthand — all widgets parented here
         pad = {"padx": 8, "pady": 3}
 
         # ── Profiles section ─────────────────────────────────────────────
-        ttk.Label(self, text="Profiles", font=("", 10, "bold")).pack(
+        ttk.Label(f, text="Profiles", font=("", 10, "bold")).pack(
             anchor="w", **pad)
-        ttk.Separator(self).pack(fill="x", padx=8, pady=2)
+        ttk.Separator(f).pack(fill="x", padx=8, pady=2)
 
         self.profile_var = tk.StringVar(value="")
-        self.profile_combo = ttk.Combobox(self, textvariable=self.profile_var,
+        self.profile_combo = ttk.Combobox(f, textvariable=self.profile_var,
                                           state="readonly", values=[])
         self.profile_combo.pack(fill="x", **pad)
         self.profile_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_load_click())
 
-        prof_btns = ttk.Frame(self)
+        prof_btns = ttk.Frame(f)
         prof_btns.pack(fill="x", **pad)
         ttk.Button(prof_btns, text="New",
                    command=self._on_new_profile).pack(side="left", expand=True, fill="x", padx=1)
@@ -757,74 +829,14 @@ class FilterSidebar(ttk.Frame):
         ttk.Button(prof_btns, text="Delete",
                    command=self._on_delete_click).pack(side="left", expand=True, fill="x", padx=1)
 
-        ttk.Separator(self).pack(fill="x", padx=8, pady=6)
-
-        # ── Filter & Sort section ────────────────────────────────────────
-        ttk.Label(self, text="Filter & Sort", font=("", 10, "bold")).pack(
-            anchor="w", **pad)
-        ttk.Separator(self).pack(fill="x", padx=8, pady=2)
-
-        # Name search
-        ttk.Label(self, text="Name search:").pack(anchor="w", **pad)
-        self.name_var = tk.StringVar()
-        self.name_var.trace_add("write", lambda *_: self.on_change())
-        ttk.Entry(self, textvariable=self.name_var).pack(fill="x", **pad)
-
-        # Category dropdown
-        ttk.Label(self, text="Category:").pack(anchor="w", **pad)
-        self.cat_var = tk.StringVar(value="All")
-        self.cat_var.trace_add("write", lambda *_: self.on_change())
-        self.cat_combo = ttk.Combobox(self, textvariable=self.cat_var,
-                                      state="readonly", values=["All"])
-        self.cat_combo.pack(fill="x", **pad)
-
-        # Hide chains
-        self.hide_chains_var = tk.BooleanVar(value=False)
-        self.hide_chains_var.trace_add("write", lambda *_: self.on_change())
-        ttk.Checkbutton(self, text="Hide chains",
-                        variable=self.hide_chains_var).pack(anchor="w", **pad)
-
-        # Min score
-        ttk.Label(self, text="Min score:").pack(anchor="w", **pad)
-        self.min_score_var = tk.IntVar(value=0)
-        self.min_score_label = ttk.Label(self, text="0")
-        self.min_score_label.pack(anchor="e", padx=8)
-        self.score_slider = ttk.Scale(
-            self, from_=0, to=100,
-            variable=self.min_score_var,
-            command=self._on_score_slide,
-        )
-        self.score_slider.pack(fill="x", **pad)
-
-        ttk.Separator(self).pack(fill="x", padx=8, pady=6)
-
-        # Sort
-        ttk.Label(self, text="Sort by:").pack(anchor="w", **pad)
-        self.sort_var = tk.StringVar(value="Score")
-        self.sort_var.trace_add("write", lambda *_: self.on_change())
-        ttk.Combobox(self, textvariable=self.sort_var, state="readonly",
-                     values=["Score", "Distance", "Name", "Category"]).pack(fill="x", **pad)
-
-        ttk.Separator(self).pack(fill="x", padx=8, pady=6)
-
-        # Custom filter button
-        self.custom_filter_btn = ttk.Button(self, text="Build Custom Filter",
-                                            command=self._open_custom_filter)
-        self.custom_filter_btn.pack(fill="x", **pad)
-        self.custom_filter_label = ttk.Label(self, text="", foreground="#e67e22",
-                                             wraplength=SIDEBAR_W - 20)
-        self.custom_filter_label.pack(anchor="w", **pad)
-        ttk.Button(self, text="Clear Custom Filter",
-                   command=self._clear_custom_filter).pack(fill="x", **pad)
-
-        ttk.Separator(self).pack(fill="x", padx=8, pady=6)
+        ttk.Separator(f).pack(fill="x", padx=8, pady=6)
 
         # ── AI Scoring section ────────────────────────────────────────────
-        ttk.Label(self, text="AI Scoring (Local LLM)", font=("", 10, "bold")).pack(
+        ttk.Label(f, text="AI Scoring (Local LLM)", font=("", 10, "bold")).pack(
             anchor="w", **pad)
-        ttk.Separator(self).pack(fill="x", padx=8, pady=2)
+        ttk.Separator(f).pack(fill="x", padx=8, pady=2)
 
-        ai_status_row = ttk.Frame(self)
+        ai_status_row = ttk.Frame(f)
         ai_status_row.pack(fill="x", **pad)
         self._ai_dot = tk.Label(ai_status_row, text="●", font=("", 10), fg="#95a5a6")
         self._ai_dot.pack(side="left")
@@ -833,22 +845,177 @@ class FilterSidebar(ttk.Frame):
         self._ai_status_lbl.pack(side="left", padx=4)
 
         self.ai_scoring_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(self, text="Enable AI Scoring",
+        ttk.Checkbutton(f, text="Enable AI Scoring",
                         variable=self.ai_scoring_var).pack(anchor="w", **pad)
 
         if self._on_ai_settings:
-            ttk.Button(self, text="AI Settings…",
+            ttk.Button(f, text="AI Settings…",
                        command=self._on_ai_settings).pack(fill="x", **pad)
 
-        ttk.Separator(self).pack(fill="x", padx=8, pady=6)
+        ttk.Separator(f).pack(fill="x", padx=8, pady=6)
+
+        # ── Filter & Sort section ────────────────────────────────────────
+        ttk.Label(f, text="Filter & Sort", font=("", 10, "bold")).pack(
+            anchor="w", **pad)
+        ttk.Separator(f).pack(fill="x", padx=8, pady=2)
+
+        # Name search
+        ttk.Label(f, text="Name search:").pack(anchor="w", **pad)
+        self.name_var = tk.StringVar()
+        self.name_var.trace_add("write", lambda *_: self.on_change())
+        ttk.Entry(f, textvariable=self.name_var).pack(fill="x", **pad)
+
+        # Category dropdown
+        ttk.Label(f, text="Category:").pack(anchor="w", **pad)
+        self.cat_var = tk.StringVar(value="All")
+        self.cat_var.trace_add("write", lambda *_: self.on_change())
+        self.cat_combo = ttk.Combobox(f, textvariable=self.cat_var,
+                                      state="readonly", values=["All"])
+        self.cat_combo.pack(fill="x", **pad)
+
+        # Hide chains
+        self.hide_chains_var = tk.BooleanVar(value=False)
+        self.hide_chains_var.trace_add("write", lambda *_: self.on_change())
+        ttk.Checkbutton(f, text="Hide chains",
+                        variable=self.hide_chains_var).pack(anchor="w", **pad)
+
+        # Min score
+        ttk.Label(f, text="Min score:").pack(anchor="w", **pad)
+        self.min_score_var = tk.IntVar(value=0)
+        self.min_score_label = ttk.Label(f, text="0")
+        self.min_score_label.pack(anchor="e", padx=8)
+        self.score_slider = ttk.Scale(
+            f, from_=0, to=100,
+            variable=self.min_score_var,
+            command=self._on_score_slide,
+        )
+        self.score_slider.pack(fill="x", **pad)
+
+        ttk.Separator(f).pack(fill="x", padx=8, pady=6)
+
+        # ── Operating Status section ──────────────────────────────────────
+        ttk.Label(f, text="Operating Status", font=("", 9, "bold")).pack(
+            anchor="w", **pad)
+        self.open_now_var = tk.BooleanVar(value=False)
+        self.open_now_var.trace_add("write", lambda *_: self.on_change())
+        ttk.Checkbutton(f, text="Open now",
+                        variable=self.open_now_var).pack(anchor="w", **pad)
+
+        ttk.Separator(f).pack(fill="x", padx=8, pady=6)
+
+        # ── Attributes section ────────────────────────────────────────────
+        ttk.Label(f, text="Attributes", font=("", 9, "bold")).pack(
+            anchor="w", **pad)
+        self.wheelchair_var = tk.BooleanVar(value=False)
+        self.wheelchair_var.trace_add("write", lambda *_: self.on_change())
+        ttk.Checkbutton(f, text="Wheelchair accessible",
+                        variable=self.wheelchair_var).pack(anchor="w", **pad)
+
+        self.outdoor_seating_var = tk.BooleanVar(value=False)
+        self.outdoor_seating_var.trace_add("write", lambda *_: self.on_change())
+        ttk.Checkbutton(f, text="Outdoor seating",
+                        variable=self.outdoor_seating_var).pack(anchor="w", **pad)
+
+        self.delivery_var = tk.BooleanVar(value=False)
+        self.delivery_var.trace_add("write", lambda *_: self.on_change())
+        ttk.Checkbutton(f, text="Delivery",
+                        variable=self.delivery_var).pack(anchor="w", **pad)
+
+        self.takeout_var = tk.BooleanVar(value=False)
+        self.takeout_var.trace_add("write", lambda *_: self.on_change())
+        ttk.Checkbutton(f, text="Takeout / takeaway",
+                        variable=self.takeout_var).pack(anchor="w", **pad)
+
+        # ── AI Attribute Filter ───────────────────────────────────────────
+        ttk.Separator(f).pack(fill="x", padx=8, pady=4)
+        ttk.Label(f, text="AI: custom attribute", font=("Segoe UI", 8, "italic"),
+                  foreground="#555").pack(anchor="w", padx=8)
+        self._ai_attr_var = tk.StringVar()
+        ttk.Entry(f, textvariable=self._ai_attr_var).pack(fill="x", **pad)
+        ai_attr_row = ttk.Frame(f)
+        ai_attr_row.pack(fill="x", **pad)
+        ttk.Button(ai_attr_row, text="Apply",
+                   command=self._apply_ai_attr).pack(side="left", expand=True, fill="x", padx=1)
+        ttk.Button(ai_attr_row, text="Clear",
+                   command=self._clear_ai_attr).pack(side="left", expand=True, fill="x", padx=1)
+        self._ai_attr_status = ttk.Label(f, text="", foreground="#7f8c8d",
+                                         font=("Segoe UI", 7), wraplength=SIDEBAR_W - 20)
+        self._ai_attr_status.pack(anchor="w", padx=8)
+        # Runtime state
+        self._ai_attr_matches: set | None = None   # None = inactive
+        self._on_ai_attr_filter = None             # set by App after init
+
+        ttk.Separator(f).pack(fill="x", padx=8, pady=6)
+
+        # Sort
+        ttk.Label(f, text="Sort by:").pack(anchor="w", **pad)
+        self.sort_var = tk.StringVar(value="Score")
+        self.sort_var.trace_add("write", lambda *_: self.on_change())
+        ttk.Combobox(
+            f, textvariable=self.sort_var, state="readonly",
+            values=["Score", "Distance", "Name", "Category",
+                    "Completeness", "Has Phone", "Has Website", "AI Score"],
+        ).pack(fill="x", **pad)
+
+        self.sort_desc_var = tk.BooleanVar(value=True)
+        self.sort_desc_var.trace_add("write", lambda *_: self.on_change())
+        ttk.Checkbutton(f, text="Descending",
+                        variable=self.sort_desc_var).pack(anchor="w", padx=8, pady=1)
+
+        ttk.Separator(f).pack(fill="x", padx=8, pady=6)
+
+        # ── Saved Searches section ────────────────────────────────────────
+        ttk.Label(f, text="Saved Searches", font=("", 9, "bold")).pack(
+            anchor="w", **pad)
+        self._saved_search_var = tk.StringVar()
+        self._saved_search_combo = ttk.Combobox(
+            f, textvariable=self._saved_search_var, state="readonly", values=[])
+        self._saved_search_combo.pack(fill="x", **pad)
+        self._saved_search_combo.bind("<<ComboboxSelected>>", self._load_search)
+
+        ss_btns = ttk.Frame(f)
+        ss_btns.pack(fill="x", **pad)
+        ttk.Button(ss_btns, text="Save Search",
+                   command=self._save_search).pack(side="left", expand=True, fill="x", padx=1)
+        ttk.Button(ss_btns, text="Delete",
+                   command=self._delete_search).pack(side="left", expand=True, fill="x", padx=1)
+
+        ttk.Separator(f).pack(fill="x", padx=8, pady=6)
+
+        # Custom filter button
+        self.custom_filter_btn = ttk.Button(f, text="Build Custom Filter",
+                                            command=self._open_custom_filter)
+        self.custom_filter_btn.pack(fill="x", **pad)
+        self.custom_filter_label = ttk.Label(f, text="", foreground="#e67e22",
+                                             wraplength=SIDEBAR_W - 20)
+        self.custom_filter_label.pack(anchor="w", **pad)
+        ttk.Button(f, text="Clear Custom Filter",
+                   command=self._clear_custom_filter).pack(fill="x", **pad)
+
+        ttk.Separator(f).pack(fill="x", padx=8, pady=6)
 
         # Reset
-        ttk.Button(self, text="Reset All Filters",
+        ttk.Button(f, text="Reset All Filters",
                    command=self._reset).pack(fill="x", **pad)
 
         # Store custom filter state
         self._custom_rules = []
         self._custom_combine = "AND"
+
+    def _on_inner_configure(self, event=None):
+        self._canvas.configure(scrollregion=self._canvas.bbox("all"))
+
+    def _on_canvas_configure(self, event=None):
+        self._canvas.itemconfig(self._canvas_win, width=event.width)
+
+    def _bind_mousewheel(self):
+        self._canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+
+    def _unbind_mousewheel(self):
+        self._canvas.unbind_all("<MouseWheel>")
+
+    def _on_mousewheel(self, event):
+        self._canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
     # ── Profile button handlers ───────────────────────────────────────────
 
@@ -874,6 +1041,30 @@ class FilterSidebar(ttk.Frame):
         name = self.profile_var.get()
         if name and self._on_profile_delete:
             self._on_profile_delete(name)
+
+    # ── Saved search handlers ─────────────────────────────────────────────
+
+    def _save_search(self):
+        from tkinter import simpledialog
+        name = simpledialog.askstring("Save Search", "Name for this search:", parent=self)
+        if name and name.strip():
+            if self._on_save_search:
+                self._on_save_search(name.strip(), self.get_state())
+
+    def _delete_search(self):
+        name = self._saved_search_var.get()
+        if name and self._on_delete_search:
+            self._on_delete_search(name)
+
+    def _load_search(self, event=None):
+        name = self._saved_search_var.get()
+        if name and self._on_load_search:
+            self._on_load_search(name)
+
+    def refresh_saved_searches(self, searches: list[dict]):
+        self._saved_searches = searches
+        names = [s["name"] for s in searches]
+        self._saved_search_combo["values"] = names
 
     def set_ai_status(self, running: bool):
         """Update the AI status dot and label."""
@@ -907,6 +1098,8 @@ class FilterSidebar(ttk.Frame):
             self.min_score_label.config(text=str(v))
         if "sort_by" in state:
             self.sort_var.set(state.get("sort_by", "Score"))
+        if "sort_descending" in state:
+            self.sort_desc_var.set(bool(state["sort_descending"]))
         if "custom_rules" in state:
             self._custom_rules = list(state["custom_rules"])
         if "custom_combine" in state:
@@ -916,6 +1109,17 @@ class FilterSidebar(ttk.Frame):
                 text=f"{n} rule{'s' if n != 1 else ''} active ({self._custom_combine})"
                 if n else ""
             )
+        if "open_now" in state:
+            self.open_now_var.set(bool(state["open_now"]))
+        if "has_wheelchair" in state:
+            self.wheelchair_var.set(bool(state["has_wheelchair"]))
+        if "has_outdoor_seating" in state:
+            self.outdoor_seating_var.set(bool(state["has_outdoor_seating"]))
+        if "has_delivery" in state:
+            self.delivery_var.set(bool(state["has_delivery"]))
+        if "has_takeout" in state:
+            self.takeout_var.set(bool(state["has_takeout"]))
+        # AI attr filter is session-only; intentionally not restored from saved state
 
     # ── Score slider ──────────────────────────────────────────────────────
 
@@ -942,6 +1146,28 @@ class FilterSidebar(ttk.Frame):
         self.custom_filter_label.config(text="")
         self.on_change()
 
+    # ── AI attribute filter handlers ──────────────────────────────────────
+
+    def _apply_ai_attr(self):
+        query = self._ai_attr_var.get().strip()
+        if not query:
+            return
+        if self._on_ai_attr_filter:
+            self._on_ai_attr_filter(query)
+
+    def _clear_ai_attr(self):
+        self._ai_attr_matches = None
+        self._ai_attr_var.set("")
+        self._ai_attr_status.config(text="")
+        self.on_change()
+
+    def set_ai_attr_status(self, text: str):
+        self._ai_attr_status.config(text=text)
+
+    def set_ai_attr_matches(self, matches: set | None):
+        self._ai_attr_matches = matches
+        self.on_change()
+
     def _reset(self):
         self.name_var.set("")
         self.cat_var.set("All")
@@ -949,6 +1175,13 @@ class FilterSidebar(ttk.Frame):
         self.min_score_var.set(0)
         self.min_score_label.config(text="0")
         self.sort_var.set("Score")
+        self.sort_desc_var.set(True)
+        self.open_now_var.set(False)
+        self.wheelchair_var.set(False)
+        self.outdoor_seating_var.set(False)
+        self.delivery_var.set(False)
+        self.takeout_var.set(False)
+        self._clear_ai_attr()
         self._clear_custom_filter()
 
     def update_categories(self, categories: list[str]):
@@ -959,14 +1192,105 @@ class FilterSidebar(ttk.Frame):
 
     def get_state(self) -> dict:
         return {
-            "name_query":    self.name_var.get(),
-            "category":      self.cat_var.get(),
-            "hide_chains":   self.hide_chains_var.get(),
-            "min_score":     int(self.min_score_var.get()),
-            "sort_by":       self.sort_var.get(),
-            "custom_rules":  self._custom_rules,
-            "custom_combine": self._custom_combine,
+            "name_query":          self.name_var.get(),
+            "category":            self.cat_var.get(),
+            "hide_chains":         self.hide_chains_var.get(),
+            "min_score":           int(self.min_score_var.get()),
+            "sort_by":             self.sort_var.get(),
+            "sort_descending":     self.sort_desc_var.get(),
+            "custom_rules":        self._custom_rules,
+            "custom_combine":      self._custom_combine,
+            "open_now":            self.open_now_var.get(),
+            "has_wheelchair":      self.wheelchair_var.get(),
+            "has_outdoor_seating": self.outdoor_seating_var.get(),
+            "has_delivery":        self.delivery_var.get(),
+            "has_takeout":         self.takeout_var.get(),
+            "ai_attr_active":      self._ai_attr_matches is not None,
+            "ai_attr_matches":     self._ai_attr_matches or set(),
         }
+
+
+# ---------------------------------------------------------------------------
+# Comparison View
+# ---------------------------------------------------------------------------
+
+class CompareDialog(tk.Toplevel):
+    """Side-by-side comparison of up to 6 businesses."""
+
+    _ROWS = [
+        ("Score",           lambda b, _: f"{b.get('score', 0)}/100"),
+        ("Industry",        lambda b, _: b.get("industry", "")),
+        ("Entity Type",     lambda b, _: b.get("entity_type", "")),
+        ("Chain?",          lambda b, _: "Yes" if b.get("is_chain") else "No"),
+        ("Distance",        lambda b, _: f"{b.get('distance_miles', 0):.1f} mi"),
+        ("Phone",           lambda b, _: b.get("phone") or b.get("tags", {}).get("phone", "") or "—"),
+        ("Website",         lambda b, _: b.get("website") or b.get("tags", {}).get("website", "") or "—"),
+        ("Address",         lambda b, _: b.get("address", "") or "—"),
+        ("Target Audience", lambda b, _: b.get("target_audience", b.get("audience_overlap", "")) or "—"),
+        ("OSM Completeness",lambda b, _: f"{b.get('osm_completeness', 0)}%"),
+        ("Notes",           lambda b, notes: notes.get(b.get("osm_id", ""), "") or "—"),
+    ]
+
+    def __init__(self, parent, businesses: list[dict], notes: dict):
+        super().__init__(parent)
+        self.title("Compare Businesses")
+        n = len(businesses)
+        width = min(1400, max(700, n * 230))
+        self.geometry(f"{width}x520")
+        self.minsize(500, 400)
+        self.resizable(True, True)
+
+        # Pack button FIRST so it always gets its space before the canvas expands.
+        ttk.Button(self, text="Close", command=self.destroy).pack(side="bottom", pady=8)
+
+        # Outer canvas + horizontal scrollbar for overflow when many columns
+        outer = ttk.Frame(self)
+        outer.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(outer, highlightthickness=0, bd=0)
+        hsb = ttk.Scrollbar(outer, orient="horizontal", command=canvas.xview)
+        vsb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(xscrollcommand=hsb.set, yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        hsb.pack(side="bottom", fill="x")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        inner = ttk.Frame(canvas)
+        win = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_inner(*_):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        def _on_canvas(e):
+            canvas.itemconfigure(win, height=max(e.height, inner.winfo_reqheight()))
+        inner.bind("<Configure>", _on_inner)
+        canvas.bind("<Configure>", _on_canvas)
+
+        def _mwheel(e):
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        canvas.bind("<Enter>", lambda _: canvas.bind_all("<MouseWheel>", _mwheel))
+        canvas.bind("<Leave>", lambda _: canvas.unbind_all("<MouseWheel>"))
+
+        # Row-label column
+        ttk.Label(inner, text="", width=18).grid(row=0, column=0, padx=4, pady=4, sticky="nw")
+        for row_idx, (label, _) in enumerate(self._ROWS, start=1):
+            ttk.Label(inner, text=label, font=("", 9, "bold"), anchor="w").grid(
+                row=row_idx, column=0, padx=(8, 4), pady=3, sticky="nw"
+            )
+
+        # One column per business
+        for col_idx, biz in enumerate(businesses, start=1):
+            frm = ttk.LabelFrame(inner, text=biz.get("name", f"Business {col_idx}"),
+                                 padding=(6, 4))
+            frm.grid(row=0, column=col_idx, padx=4, pady=(6, 2), sticky="nsew")
+            inner.columnconfigure(col_idx, weight=1, minsize=200)
+
+            for row_idx, (_, extractor) in enumerate(self._ROWS, start=1):
+                value = extractor(biz, notes)
+                lbl = ttk.Label(inner, text=value, wraplength=190, justify="left",
+                                anchor="nw", foreground="#2c3e50")
+                lbl.grid(row=row_idx, column=col_idx, padx=(8, 4), pady=3, sticky="nw")
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -990,9 +1314,18 @@ class App(tk.Tk):
             pass
 
         self._config = load_config()
+        debug_cfg = self._config.get("debug_settings", {})
+        ai_cfg_boot = self._config.get("ai_settings", {})
+        applog.setup(
+            debug=bool(ai_cfg_boot.get("debug_mode", False)),
+            file_logging=bool(debug_cfg.get("store_logs", True)),
+        )
         self._notes  = load_notes()
         self._all_businesses: list[dict] = []
         self._shortlist: set[str] = load_shortlist()  # persisted OSM IDs
+        self._history: list[dict] = load_history()
+        self._saved_searches: list[dict] = load_saved_searches()
+        self._collections: dict = load_collections()
         self._search_lat  = None
         self._search_lon  = None
         self._search_radius = self._config.get("last_radius_miles", 5.0)
@@ -1006,14 +1339,22 @@ class App(tk.Tk):
         self._ai_weight         = max(0.0, min(1.0, float(ai_cfg.get("weight", 0.5))))
         self._ai_explain_on     = bool(ai_cfg.get("explain_on", True))
         self._ai_scoring_on     = bool(ai_cfg.get("scoring_on", False))
-        self._ai_max_score      = max(10, int(ai_cfg.get("max_score", 50)))
+        self._ai_max_score      = max(10, int(ai_cfg.get("max_score", 500)))
         self._ai_disable_max_limit = bool(ai_cfg.get("disable_max_limit", True))
+        self._ai_debug          = bool(ai_cfg.get("debug_mode", False))
+        if self._ai_debug:
+            os.environ["DEBUG"] = "1"
+        else:
+            os.environ.pop("DEBUG", None)
         self._ai_running        = False   # is local AI model loaded?
         self._ai_prompt_active  = False
 
         self._apply_window_geometry()
         self._build_ui()
         self._sidebar.ai_scoring_var.set(self._ai_scoring_on)
+        self._sidebar.ai_scoring_var.trace_add(
+            "write", lambda *_: self._update_score_column_heading()
+        )
         # Populate profile dropdown after sidebar is built
         profile_names = [p["name"] for p in self._profiles]
         self._sidebar.update_profiles(profile_names)
@@ -1073,28 +1414,47 @@ class App(tk.Tk):
         bar = ttk.Frame(self, padding=(8, 6))
         bar.pack(fill="x", side="top")
 
-        # Location mode radio buttons
-        self._loc_mode = tk.StringVar(value="address")
-        modes = [("Address", "address"), ("Saved Location", "saved"), ("Drop a Pin", "pin")]
-        for text, val in modes:
-            ttk.Radiobutton(bar, text=text, variable=self._loc_mode, value=val,
-                            command=self._on_loc_mode_change).pack(side="left", padx=4)
+        # ── Location section ──────────────────────────────────────────────
+        # No mode-switching radio buttons. One combobox handles everything:
+        # type an address directly, or pick from the saved locations dropdown.
+        loc_frame = ttk.Frame(bar)
+        loc_frame.pack(side="left")
 
-        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=6)
+        loc_row = ttk.Frame(loc_frame)
+        loc_row.pack(fill="x")
 
-        # Address entry field
+        ttk.Label(loc_row, text="📍").pack(side="left", padx=(2, 1))
+
         self._addr_var = tk.StringVar()
-        self._addr_entry = ttk.Entry(bar, textvariable=self._addr_var, width=35)
-        self._addr_entry.pack(side="left", padx=4)
-        self._addr_entry.bind("<Return>", lambda _: self._trigger_search())
+        self._loc_combo = ttk.Combobox(loc_row, textvariable=self._addr_var, width=30)
+        self._loc_combo.pack(side="left", padx=(0, 4))
+        self._loc_combo.bind("<Return>", lambda _: self._trigger_search())
+        self._loc_combo.bind("<<ComboboxSelected>>", self._on_saved_location_selected)
+        self._loc_combo.bind("<Key>", self._on_loc_field_edited)
 
-        # Save/Load location buttons
-        self._save_loc_btn = ttk.Button(bar, text="Save Location",
-                                        command=self._save_location)
-        self._save_loc_btn.pack(side="left", padx=2)
-        self._load_loc_btn = ttk.Button(bar, text="Load Saved",
-                                        command=self._load_saved_location)
-        self._load_loc_btn.pack(side="left", padx=2)
+        self._hw_loc_btn = ttk.Button(loc_row, text="◉ My Location",
+                                      command=self._request_topbar_location, width=13)
+        self._hw_loc_btn.pack(side="left", padx=2)
+
+        ttk.Button(loc_row, text="🗺 Map",
+                   command=self._open_pin_dialog, width=7).pack(side="left", padx=2)
+
+        ttk.Button(loc_row, text="💾 Save",
+                   command=self._save_current_location, width=7).pack(side="left", padx=2)
+
+        # Small resolved-coords readout — hidden until a location is set
+        self._coord_label = ttk.Label(
+            loc_frame, text="", foreground="#7f8c8d",
+            font=("Segoe UI", 7, "italic"),
+        )
+        self._coord_label.pack(anchor="w", padx=(20, 0))
+
+        # Flag used to suppress coord-clearing when we set the field from code
+        self._setting_location_programmatically = False
+
+        # Populate dropdown and restore last location from config
+        self._refresh_saved_locations_dropdown()
+        self._restore_last_location()
 
         ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=6)
 
@@ -1125,8 +1485,6 @@ class App(tk.Tk):
         self._search_btn = ttk.Button(bar, text="Search", command=self._trigger_search)
         self._search_btn.pack(side="left", padx=8)
 
-        self._on_loc_mode_change()
-
     def _build_main_area(self):
         outer_paned = ttk.PanedWindow(self, orient="horizontal")
         outer_paned.pack(fill="both", expand=True, padx=4, pady=4)
@@ -1141,7 +1499,12 @@ class App(tk.Tk):
             on_profile_new=self._on_profile_new,
             on_profile_edit=self._on_profile_edit,
             on_ai_settings=self._open_ai_settings,
+            on_save_search=self._save_search,
+            on_delete_search=self._delete_search,
+            on_load_search=self._load_search,
         )
+        self._sidebar._on_ai_attr_filter = self._run_ai_attr_filter
+        self._sidebar.refresh_saved_searches(self._saved_searches)
         outer_paned.add(self._sidebar, weight=0)
 
         # --- Results | custom sash | Detail ---
@@ -1215,7 +1578,7 @@ class App(tk.Tk):
         # Columns include a hidden checkbox-equivalent: managed via selection + shortlist set
         cols = ("shortlist",) + TREE_COLUMNS
         self._tree = ttk.Treeview(parent, columns=cols, show="headings",
-                                  selectmode="browse")
+                                  selectmode="extended")
 
         # Shortlist column
         self._tree.heading("shortlist", text="★")
@@ -1262,6 +1625,10 @@ class App(tk.Tk):
         # otherwise pack has already given all space to the expanding widget.
         ttk.Button(bar, text="Export Shortlist CSV",
                    command=self._export_csv).pack(side="right", padx=4)
+        ttk.Button(bar, text="Export JSON",
+                   command=self._export_json).pack(side="right", padx=2)
+        ttk.Button(bar, text="History",
+                   command=self._show_history).pack(side="right", padx=2)
 
         self._count_var = tk.StringVar(value="")
         ttk.Label(bar, textvariable=self._count_var).pack(side="right", padx=8)
@@ -1273,76 +1640,141 @@ class App(tk.Tk):
         ttk.Label(bar, textvariable=self._status_var, anchor="w").pack(side="left", fill="x",
                                                                         expand=True)
 
-    # ------------------------------------------------------------------
-    # Location mode
-    # ------------------------------------------------------------------
-
-    def _on_loc_mode_change(self):
-        mode = self._loc_mode.get()
-        if mode == "address":
-            self._addr_entry.config(state="normal")
-            self._save_loc_btn.config(state="normal")
-            self._load_loc_btn.config(state="normal")
-        elif mode == "saved":
-            self._addr_entry.config(state="disabled")
-            saved = self._config.get("saved_location", {})
-            self._search_lat = saved.get("lat")
-            self._search_lon = saved.get("lon")
-            addr = saved.get("address", "No saved location")
-            self._addr_var.set(addr)
-            self._save_loc_btn.config(state="disabled")
-            self._load_loc_btn.config(state="normal")
-        elif mode == "pin":
-            self._addr_entry.config(state="disabled")
-            self._save_loc_btn.config(state="disabled")
-            self._load_loc_btn.config(state="disabled")
-            # Restore last saved pin into memory so the dialog pre-fills it
-            if not (self._search_lat and self._search_lon):
-                saved_pin = self._config.get("saved_pin", {})
-                if saved_pin.get("lat") and saved_pin.get("lon"):
-                    self._search_lat = saved_pin["lat"]
-                    self._search_lon = saved_pin["lon"]
-                    self._addr_var.set(f"{self._search_lat:.5f}, {self._search_lon:.5f}")
-            self._open_pin_dialog()
-
     @staticmethod
-    def _get_device_location():
+    def _get_device_location(timeout: float = 8.0):
         """
-        Try to get the user's current position from OS location services.
-        Returns (lat, lon) or None.
+        Try to get the user's current position from OS/hardware location services.
+        Returns (lat, lon) on success, or None if no provider is available.
+        Raises PermissionError if the OS explicitly denies location access.
+        Never contacts any IP geolocation service.
 
-        Priority:
-          1. Windows Location API  (winrt — actual device location services)
-          2. IP geolocation        (ip-api.com — no API key, free fallback)
+        Windows priority:
+          1. WinRT  (Windows.Devices.Geolocation — GPS/WiFi/cell, requires winrt pkg)
+          2. PowerShell + System.Device.Location  (no extra packages, same OS service)
+        macOS:
+          3. CoreLocation via pyobjc-framework-CoreLocation (if installed)
+        Linux:
+          4. GeoClue2 via dbus-python (if installed)
         """
-        # 1 — Windows Location API
-        try:
-            import asyncio
-            import winrt.windows.devices.geolocation as wdg  # type: ignore
+        import sys
 
-            async def _get():
-                locator = wdg.Geolocator()
-                pos = await locator.get_geoposition_async()
-                c = pos.coordinate
-                return c.latitude, c.longitude
+        # ── Windows ────────────────────────────────────────────────────────────
+        if sys.platform == "win32":
 
-            return asyncio.run(_get())
-        except Exception:
-            pass
+            # 1 — WinRT (modern Windows 10/11, accurate GPS/WiFi triangulation)
+            try:
+                import asyncio
+                import winrt.windows.devices.geolocation as wdg  # type: ignore
 
-        # 2 — IP geolocation fallback
-        try:
-            import requests as _req
-            r = _req.get(
-                "http://ip-api.com/json/?fields=status,lat,lon",
-                timeout=6,
-                headers={"User-Agent": "RedlineSponsorFinder/1.0"},
-            )
-            data = r.json()
-            if data.get("status") == "success":
-                return data["lat"], data["lon"]
-        except Exception:
-            pass
+                async def _winrt_get():
+                    locator = wdg.Geolocator()
+                    pos = await locator.get_geoposition_async()
+                    c = pos.coordinate
+                    return c.latitude, c.longitude
+
+                # Use a dedicated event loop — avoids "already running" conflicts
+                # when called from a background thread.
+                loop = asyncio.new_event_loop()
+                try:
+                    coro = asyncio.wait_for(_winrt_get(), timeout=timeout)
+                    return loop.run_until_complete(coro)
+                finally:
+                    loop.close()
+
+            except ImportError:
+                pass  # winrt not installed — try PowerShell fallback
+            except asyncio.TimeoutError:
+                pass  # location service too slow — try PowerShell fallback
+            except Exception as e:
+                err = str(e).lower()
+                if any(k in err for k in ("access", "denied", "80070005", "permission")):
+                    raise PermissionError(
+                        "Location access denied.\n"
+                        "Enable it in Windows Settings → Privacy & Security → Location."
+                    )
+                # Other WinRT failures — fall through to PowerShell
+
+            # 2 — PowerShell + .NET System.Device.Location (no extra packages)
+            try:
+                import subprocess
+                ps = (
+                    "Add-Type -AssemblyName System.Device; "
+                    "$w = [System.Device.Location.GeoCoordinateWatcher]::new(); "
+                    "$w.Start(); "
+                    "$deadline = [DateTime]::UtcNow.AddSeconds(6); "
+                    "while ($w.Position.Location.IsUnknown -and "
+                    "       [DateTime]::UtcNow -lt $deadline) "
+                    "{ Start-Sleep -Milliseconds 300 }; "
+                    "if ($w.Position.Location.IsUnknown) { exit 1 }; "
+                    "$c = $w.Position.Location; "
+                    "Write-Output \"$($c.Latitude),$($c.Longitude)\""
+                )
+                r = subprocess.run(
+                    ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                    capture_output=True, text=True, timeout=int(timeout) + 4,
+                )
+                if r.returncode == 0:
+                    parts = r.stdout.strip().split(",", 1)
+                    if len(parts) == 2:
+                        return float(parts[0]), float(parts[1])
+            except Exception:
+                pass
+
+        # ── macOS ──────────────────────────────────────────────────────────────
+        elif sys.platform == "darwin":
+            try:
+                import time
+                from CoreLocation import CLLocationManager  # type: ignore  (pyobjc)
+                mgr = CLLocationManager.alloc().init()
+                mgr.startUpdatingLocation()
+                deadline = time.monotonic() + timeout
+                while time.monotonic() < deadline:
+                    loc = mgr.location()
+                    if loc is not None:
+                        c = loc.coordinate()
+                        return c.latitude, c.longitude
+                    time.sleep(0.3)
+            except ImportError:
+                pass  # pyobjc-framework-CoreLocation not installed
+            except Exception as e:
+                if "denied" in str(e).lower() or "restricted" in str(e).lower():
+                    raise PermissionError(
+                        "Location access denied.\n"
+                        "Allow it in System Settings → Privacy & Security → Location Services."
+                    )
+
+        # ── Linux ──────────────────────────────────────────────────────────────
+        elif sys.platform.startswith("linux"):
+            try:
+                import time
+                import dbus  # type: ignore  (dbus-python)
+                bus = dbus.SystemBus()
+                mgr_iface = dbus.Interface(
+                    bus.get_object("org.freedesktop.GeoClue2",
+                                   "/org/freedesktop/GeoClue2/Manager"),
+                    "org.freedesktop.GeoClue2.Manager",
+                )
+                client_path = str(mgr_iface.GetClient())
+                client_obj = bus.get_object("org.freedesktop.GeoClue2", client_path)
+                dbus.Interface(client_obj, "org.freedesktop.GeoClue2.Client").Start()
+                props = dbus.Interface(client_obj, "org.freedesktop.DBus.Properties")
+                deadline = time.monotonic() + timeout
+                while time.monotonic() < deadline:
+                    loc_path = str(props.Get("org.freedesktop.GeoClue2.Client", "Location"))
+                    if loc_path != "/":
+                        loc_props = dbus.Interface(
+                            bus.get_object("org.freedesktop.GeoClue2", loc_path),
+                            "org.freedesktop.DBus.Properties",
+                        )
+                        lat = float(loc_props.Get("org.freedesktop.GeoClue2.Location", "Latitude"))
+                        lon = float(loc_props.Get("org.freedesktop.GeoClue2.Location", "Longitude"))
+                        return lat, lon
+                    time.sleep(0.4)
+            except ImportError:
+                pass  # dbus-python not installed
+            except Exception as e:
+                if "denied" in str(e).lower():
+                    raise PermissionError("Location access denied by GeoClue2.")
 
         return None
 
@@ -1380,49 +1812,73 @@ class App(tk.Tk):
                                    foreground="gray", font=("Segoe UI", 8, "italic"))
         loc_status_lbl.pack(side="right", padx=8)
 
-        # map widget — open at a wide view first; we'll fly in once located
-        map_widget = tmv.TkinterMapView(dlg, width=640, height=420, corner_radius=0)
+        # map widget — use a persistent tile cache so tiles are only downloaded once.
+        # Set the initial view before pack so the first render loads the right tiles.
+        map_widget = tmv.TkinterMapView(dlg, width=640, height=420, corner_radius=0,
+                                        database_path=get_tile_cache_path())
+        if self._search_lat and self._search_lon:
+            map_widget.set_position(self._search_lat, self._search_lon)
+            map_widget.set_zoom(13)
+        else:
+            # Continental US center — a reasonable starting view
+            map_widget.set_position(39.5, -98.35)
+            map_widget.set_zoom(4)
         map_widget.pack(fill="both", expand=True, padx=8, pady=6)
-        map_widget.set_zoom(3)
 
-        _state = {"marker": None, "lat": None, "lon": None, "located": False}
+        # manually_pinned: True once the user has clicked the map themselves,
+        # so an auto-located marker doesn't overwrite an intentional pin.
+        # use_loc_btn: stored here so _request_device_location can reference it
+        # before the widget is constructed (populated right after btn creation).
+        _state = {
+            "marker": None, "lat": None, "lon": None,
+            "located": False, "manually_pinned": False,
+            "use_loc_btn": None,
+        }
 
         def _fly_to(lat, lon, zoom=13):
             map_widget.set_position(lat, lon)
             map_widget.set_zoom(zoom)
 
-        # If a pin was already set previously, restore it immediately
-        if self._search_lat and self._search_lon:
-            _fly_to(self._search_lat, self._search_lon)
-            _state["marker"] = map_widget.set_marker(
-                self._search_lat, self._search_lon, text="Pin"
-            )
-            _state["lat"] = self._search_lat
-            _state["lon"] = self._search_lon
-            _state["located"] = True
-            coord_var.set(f"{self._search_lat:.6f}, {self._search_lon:.6f}")
-        else:
-            # Locate in background; show spinner-like status text
-            loc_status_var.set("Locating your position…")
+        def _request_device_location():
+            """Kick off a background hardware-location request and update the map."""
+            if not dlg.winfo_exists():
+                return
+            loc_status_var.set("Requesting location from system…")
+            btn = _state.get("use_loc_btn")
+            if btn:
+                btn.config(state="disabled")
 
             def _locate():
-                result = self._get_device_location()
+                try:
+                    result = self._get_device_location()
+                    err = None
+                except PermissionError as exc:
+                    result = None
+                    err = str(exc)
+                except Exception:
+                    result = None
+                    err = None
+
                 if not dlg.winfo_exists():
                     return
                 if result:
                     lat, lon = result
                     dlg.after(0, lambda: _on_located(lat, lon))
+                elif err:
+                    dlg.after(0, lambda: _on_location_denied(err))
                 else:
-                    dlg.after(0, lambda: loc_status_var.set("Could not determine location"))
+                    dlg.after(0, _on_location_unavailable)
 
             def _on_located(lat, lon):
                 if not dlg.winfo_exists():
                     return
-                loc_status_var.set("Location found")
+                loc_status_var.set("Location found — adjust the pin if needed")
+                btn = _state.get("use_loc_btn")
+                if btn:
+                    btn.config(state="normal")
                 _fly_to(lat, lon)
-                # Place a faint "You are here" marker only if the user hasn't
-                # already dropped a pin of their own
-                if not _state["located"]:
+                # Only auto-place the marker when the user hasn't manually dropped one
+                if not _state["manually_pinned"]:
                     if _state["marker"]:
                         _state["marker"].delete()
                     _state["marker"] = map_widget.set_marker(lat, lon, text="You are here")
@@ -1431,12 +1887,29 @@ class App(tk.Tk):
                     _state["located"] = True
                     coord_var.set(f"{lat:.6f}, {lon:.6f}")
 
+            def _on_location_denied(msg: str):
+                if not dlg.winfo_exists():
+                    return
+                loc_status_var.set("Location denied — " + msg.split("\n")[0])
+                btn = _state.get("use_loc_btn")
+                if btn:
+                    btn.config(state="normal")
+
+            def _on_location_unavailable():
+                if not dlg.winfo_exists():
+                    return
+                loc_status_var.set("Hardware location unavailable — click the map to pin manually")
+                btn = _state.get("use_loc_btn")
+                if btn:
+                    btn.config(state="normal")
+
             threading.Thread(target=_locate, daemon=True).start()
 
         def _on_map_click(coords):
             lat, lon = coords
             _state["lat"], _state["lon"] = lat, lon
             _state["located"] = True
+            _state["manually_pinned"] = True
             coord_var.set(f"{lat:.6f}, {lon:.6f}")
             loc_status_var.set("")
             if _state["marker"]:
@@ -1445,9 +1918,32 @@ class App(tk.Tk):
 
         map_widget.add_left_click_map_command(_on_map_click)
 
+        # If a pin was already set previously, restore it immediately;
+        # otherwise kick off a hardware location request automatically.
+        if self._search_lat and self._search_lon:
+            # Position was already set before pack; just place the marker.
+            _state["marker"] = map_widget.set_marker(
+                self._search_lat, self._search_lon, text="Pin"
+            )
+            _state["lat"] = self._search_lat
+            _state["lon"] = self._search_lon
+            _state["located"] = True
+            _state["manually_pinned"] = True
+            coord_var.set(f"{self._search_lat:.6f}, {self._search_lon:.6f}")
+        else:
+            # Auto-request on open — will be called after use_loc_btn is created
+            dlg.after(50, _request_device_location)
+
         # bottom button bar
         btn_bar = ttk.Frame(dlg)
         btn_bar.pack(fill="x", padx=8, pady=(0, 8))
+
+        # "Use my location" lets the user re-request hardware location any time,
+        # e.g. after granting permission in system settings mid-session.
+        use_loc_btn = ttk.Button(btn_bar, text="Use my location",
+                                 command=_request_device_location)
+        use_loc_btn.pack(side="left", padx=4)
+        _state["use_loc_btn"] = use_loc_btn  # hand the reference back to the closure
 
         def _confirm():
             if _state["lat"] is None:
@@ -1456,7 +1952,11 @@ class App(tk.Tk):
                 return
             self._search_lat = _state["lat"]
             self._search_lon = _state["lon"]
-            self._addr_var.set(f"{self._search_lat:.5f}, {self._search_lon:.5f}")
+            self._set_resolved_location(
+                f"{self._search_lat:.5f}, {self._search_lon:.5f}",
+                self._search_lat,
+                self._search_lon,
+            )
             # Persist the pin so it survives app restarts
             self._config["saved_pin"] = {"lat": self._search_lat, "lon": self._search_lon}
             save_config(self._config)
@@ -1467,8 +1967,10 @@ class App(tk.Tk):
 
     def _open_pin_dialog_text(self):
         """Fallback plain lat/lon dialog when tkintermapview is not installed."""
+        import threading
+
         dlg = tk.Toplevel(self)
-        dlg.title("Drop a Pin Manually")
+        dlg.title("Set Location Manually")
         dlg.grab_set()
         dlg.resizable(False, False)
 
@@ -1476,21 +1978,66 @@ class App(tk.Tk):
         frm.pack()
 
         ttk.Label(frm, text="Install tkintermapview for an interactive map.", foreground="gray",
-                  font=("Segoe UI", 8)).grid(row=0, column=0, columnspan=2, pady=(0, 8))
+                  font=("Segoe UI", 8)).grid(row=0, column=0, columnspan=3, pady=(0, 8))
 
         lat_var = tk.StringVar(value=str(self._search_lat or ""))
         lon_var = tk.StringVar(value=str(self._search_lon or ""))
+        status_var = tk.StringVar(value="")
 
         ttk.Label(frm, text="Latitude:").grid(row=1, column=0, sticky="e", pady=4, padx=4)
         ttk.Entry(frm, textvariable=lat_var, width=18).grid(row=1, column=1, pady=4)
         ttk.Label(frm, text="Longitude:").grid(row=2, column=0, sticky="e", pady=4, padx=4)
         ttk.Entry(frm, textvariable=lon_var, width=18).grid(row=2, column=1, pady=4)
 
+        ttk.Label(frm, textvariable=status_var, foreground="gray",
+                  font=("Segoe UI", 8, "italic")).grid(row=3, column=0, columnspan=3, pady=(2, 0))
+
+        def _use_my_location():
+            status_var.set("Requesting location from system…")
+            loc_btn.config(state="disabled")
+
+            def _locate():
+                try:
+                    result = self._get_device_location()
+                    err = None
+                except PermissionError as exc:
+                    result = None
+                    err = str(exc)
+                except Exception:
+                    result = None
+                    err = None
+
+                if not dlg.winfo_exists():
+                    return
+                if result:
+                    lat, lon = result
+                    def _apply():
+                        lat_var.set(f"{lat:.6f}")
+                        lon_var.set(f"{lon:.6f}")
+                        status_var.set("Location found")
+                        loc_btn.config(state="normal")
+                    dlg.after(0, _apply)
+                elif err:
+                    dlg.after(0, lambda: status_var.set("Denied — " + err.split("\n")[0]))
+                    dlg.after(0, lambda: loc_btn.config(state="normal"))
+                else:
+                    dlg.after(0, lambda: status_var.set("Hardware location unavailable"))
+                    dlg.after(0, lambda: loc_btn.config(state="normal"))
+
+            threading.Thread(target=_locate, daemon=True).start()
+
+        loc_btn = ttk.Button(frm, text="Use my location", command=_use_my_location)
+        loc_btn.grid(row=1, column=2, rowspan=2, padx=(8, 0), sticky="ns")
+
         def _confirm():
             try:
                 self._search_lat = float(lat_var.get())
                 self._search_lon = float(lon_var.get())
-                self._addr_var.set(f"{self._search_lat:.5f}, {self._search_lon:.5f}")
+                self._set_resolved_location(
+                    f"{self._search_lat:.5f}, {self._search_lon:.5f}",
+                    self._search_lat,
+                    self._search_lon,
+                )
                 # Persist the pin so it survives app restarts
                 self._config["saved_pin"] = {"lat": self._search_lat, "lon": self._search_lon}
                 save_config(self._config)
@@ -1499,30 +2046,152 @@ class App(tk.Tk):
                 messagebox.showerror("Invalid", "Please enter valid decimal coordinates.",
                                      parent=dlg)
 
-        ttk.Button(frm, text="OK", command=_confirm).grid(row=3, column=0, columnspan=2, pady=8)
+        ttk.Button(frm, text="OK", command=_confirm).grid(row=4, column=0, columnspan=3, pady=8)
 
-    def _save_location(self):
+    # ------------------------------------------------------------------
+    # Location helpers (redesigned)
+    # ------------------------------------------------------------------
+
+    def _get_saved_locations(self) -> list[dict]:
+        """Return the saved locations list from config.
+        Migrates the old single saved_location dict if needed."""
+        locs = self._config.get("saved_locations", [])
+        if isinstance(locs, list) and locs:
+            return locs
+        # One-time migration from old single-location format
+        old = self._config.get("saved_location", {})
+        if old.get("lat") and old.get("lon"):
+            label = (old.get("address") or "Saved Location").strip() or "Saved Location"
+            migrated = [{"label": label, "lat": old["lat"], "lon": old["lon"]}]
+            self._config["saved_locations"] = migrated
+            return migrated
+        return []
+
+    def _refresh_saved_locations_dropdown(self):
+        """Rebuild the combobox values list from config."""
+        locs = self._get_saved_locations()
+        self._loc_combo["values"] = [loc["label"] for loc in locs]
+
+    def _update_coord_label(self):
+        """Show or clear the small resolved-coords label."""
         if self._search_lat and self._search_lon:
-            self._config["saved_location"] = {
-                "address": self._addr_var.get(),
-                "lat": self._search_lat,
-                "lon": self._search_lon,
-            }
-            save_config(self._config)
-            self._set_status("Location saved.")
+            self._coord_label.config(
+                text=f"{self._search_lat:.5f}, {self._search_lon:.5f}"
+            )
         else:
-            messagebox.showinfo("No Location", "Search first to geocode a location, then save.")
+            self._coord_label.config(text="")
 
-    def _load_saved_location(self):
-        saved = self._config.get("saved_location", {})
-        if saved.get("lat") and saved.get("lon"):
-            self._search_lat = saved["lat"]
-            self._search_lon = saved["lon"]
-            self._addr_var.set(saved.get("address", ""))
-            self._set_status("Saved location loaded.")
+    def _set_resolved_location(self, label: str, lat: float, lon: float):
+        """Set both the display field and the resolved coordinates atomically."""
+        self._setting_location_programmatically = True
+        self._addr_var.set(label)
+        self._search_lat = lat
+        self._search_lon = lon
+        self._setting_location_programmatically = False
+        self._update_coord_label()
+
+    def _restore_last_location(self):
+        """Restore the last used location from config on startup."""
+        # Prefer last pin, then first saved location
+        pin = self._config.get("saved_pin", {})
+        if pin.get("lat") and pin.get("lon"):
+            lat, lon = pin["lat"], pin["lon"]
+            self._set_resolved_location(f"{lat:.5f}, {lon:.5f}", lat, lon)
+            return
+        locs = self._get_saved_locations()
+        if locs:
+            loc = locs[0]
+            self._set_resolved_location(loc["label"], loc["lat"], loc["lon"])
+
+    def _on_loc_field_edited(self, event=None):
+        """Clear resolved coords when the user types a new address manually."""
+        if self._setting_location_programmatically:
+            return
+        # Only react to printable keystrokes, not navigation keys
+        if event and (len(getattr(event, "char", "")) > 0):
+            self._search_lat = None
+            self._search_lon = None
+            self._update_coord_label()
+
+    def _on_saved_location_selected(self, event=None):
+        """Apply a saved location when selected from the combobox dropdown."""
+        label = self._addr_var.get()
+        for loc in self._get_saved_locations():
+            if loc["label"] == label:
+                self._set_resolved_location(label, loc["lat"], loc["lon"])
+                break
+
+    def _request_topbar_location(self):
+        """Hardware location request triggered from the top-bar button."""
+        import threading
+        self._hw_loc_btn.config(state="disabled", text="Locating…")
+
+        def _locate():
+            try:
+                result = self._get_device_location()
+                err_msg = None
+            except PermissionError as exc:
+                result = None
+                err_msg = str(exc)
+            except Exception:
+                result = None
+                err_msg = None
+
+            if result:
+                lat, lon = result
+                label = f"My Location ({lat:.4f}, {lon:.4f})"
+                self.after(0, lambda: self._set_resolved_location(label, lat, lon))
+                self.after(0, lambda: self._hw_loc_btn.config(
+                    state="normal", text="◉ My Location"))
+            elif err_msg:
+                self.after(0, lambda: messagebox.showwarning(
+                    "Location Denied", err_msg, parent=self))
+                self.after(0, lambda: self._hw_loc_btn.config(
+                    state="normal", text="◉ My Location"))
+            else:
+                self.after(0, lambda: self._set_status(
+                    "Hardware location unavailable — enter an address or use the Map"))
+                self.after(0, lambda: self._hw_loc_btn.config(
+                    state="normal", text="◉ My Location"))
+
+        threading.Thread(target=_locate, daemon=True).start()
+
+    def _save_current_location(self):
+        """Save the current resolved location with a user-provided name."""
+        if not (self._search_lat and self._search_lon):
+            messagebox.showinfo(
+                "No Location",
+                "Set a location first — search an address, use Map, or use My Location.",
+                parent=self,
+            )
+            return
+
+        from tkinter import simpledialog
+        default_name = self._addr_var.get()[:50] if self._addr_var.get() else ""
+        name = simpledialog.askstring(
+            "Save Location",
+            "Enter a name for this location:",
+            initialvalue=default_name,
+            parent=self,
+        )
+        if not name or not name.strip():
+            return
+        name = name.strip()
+
+        locs = self._get_saved_locations()
+        for loc in locs:
+            if loc["label"] == name:
+                loc["lat"] = self._search_lat
+                loc["lon"] = self._search_lon
+                break
         else:
-            messagebox.showinfo("No Saved Location",
-                                "No location saved yet. Enter an address and click Save Location.")
+            locs.append({"label": name, "lat": self._search_lat, "lon": self._search_lon})
+
+        self._config["saved_locations"] = locs
+        save_config(self._config)
+        self._refresh_saved_locations_dropdown()
+        self._set_resolved_location(name, self._search_lat, self._search_lon)
+        self._set_status(f"Saved '{name}'")
 
     # ------------------------------------------------------------------
     # Radius
@@ -1547,20 +2216,19 @@ class App(tk.Tk):
     # ------------------------------------------------------------------
 
     def _trigger_search(self):
-        mode = self._loc_mode.get()
-
-        if mode == "address":
+        if self._search_lat and self._search_lon:
+            # Coordinates already resolved (pin, hardware, saved, or previous geocode)
+            self._run_search(self._search_lat, self._search_lon)
+        else:
             addr = self._addr_var.get().strip()
             if not addr:
-                messagebox.showwarning("No Address", "Please enter an address to search.")
+                messagebox.showwarning(
+                    "No Location",
+                    "Enter an address, or use 'My Location' / 'Map' to set a location.",
+                    parent=self,
+                )
                 return
             self._geocode_then_search(addr)
-        elif mode in ("saved", "pin"):
-            if not self._search_lat or not self._search_lon:
-                messagebox.showwarning("No Location",
-                                       "No location set. Choose 'Address' or 'Drop a Pin'.")
-                return
-            self._run_search(self._search_lat, self._search_lon)
 
     def _geocode_then_search(self, address: str):
         self._set_status("Geocoding address…")
@@ -1605,6 +2273,7 @@ class App(tk.Tk):
     def _run_search(self, lat: float, lon: float):
         self._search_lat = lat
         self._search_lon = lon
+        self._update_coord_label()
         self._set_status("Searching…")
         self._start_progress()
         self._search_btn.config(state="disabled")
@@ -1648,7 +2317,7 @@ class App(tk.Tk):
         self.update_idletasks()
         mx, my = self.winfo_rootx(), self.winfo_rooty()
         mw, mh = self.winfo_width(), self.winfo_height()
-        dlg.geometry(f"+{mx + mw // 2 - 200}+{my + mh // 2 - 70}")
+        dlg.geometry(f"420x160+{mx + mw // 2 - 210}+{my + mh // 2 - 80}")
 
         frm = ttk.Frame(dlg, padding=20)
         frm.pack()
@@ -1729,13 +2398,27 @@ class App(tk.Tk):
             category=state["category"],
             hide_chains=state["hide_chains"],
             min_score=state["min_score"],
+            open_now=state.get("open_now", False),
+            has_wheelchair=state.get("has_wheelchair", False),
+            has_outdoor_seating=state.get("has_outdoor_seating", False),
+            has_delivery=state.get("has_delivery", False),
+            has_takeout=state.get("has_takeout", False),
         )
         filtered = apply_custom_filter(
             filtered,
             rules=state["custom_rules"],
             combine=state["custom_combine"],
         )
-        filtered = sort_businesses(filtered, sort_by=state["sort_by"])
+        # AI attribute filter: only keep businesses in the AI-evaluated match set
+        if state.get("ai_attr_active") and state.get("ai_attr_matches") is not None:
+            match_set = state["ai_attr_matches"]
+            filtered = [b for b in filtered if b.get("osm_id", "") in match_set]
+
+        filtered = sort_businesses(
+            filtered,
+            sort_by=state["sort_by"],
+            descending=state.get("sort_descending"),
+        )
 
         self._populate_tree(filtered)
         total = len(self._all_businesses)
@@ -1747,8 +2430,11 @@ class App(tk.Tk):
         self._iid_map.clear()
         self._detail.clear()
 
+        ai_on = self._sidebar.ai_scoring_var.get()
+
         for i, b in enumerate(businesses):
-            score   = b.get("score", 0)
+            rule_score = b.get("score", 0)
+            score      = b.get("ai_score", rule_score) if ai_on else rule_score
             tags    = b.get("tags", {})
             phone   = b.get("phone") or tags.get("phone", "")
             website = b.get("website") or tags.get("website", "")
@@ -1802,6 +2488,8 @@ class App(tk.Tk):
             if b:
                 self._detail.show(b)
                 self._fetch_ai_explanation(b)
+                self._history = append_history_entry(self._history, b)
+                save_history(self._history)
 
     def _on_row_double_click(self, event):
         """Double-click toggles shortlist."""
@@ -1838,34 +2526,126 @@ class App(tk.Tk):
                 self._toggle_shortlist(b.get("osm_id", ""))
 
     def _on_row_right_click(self, event):
-        """Right-click context menu: shortlist toggle + add note."""
+        """Right-click context menu: shortlist toggle + add note. Bulk actions if multiple selected."""
         iid = self._tree.identify_row(event.y)
         if not iid:
             return
-        self._tree.selection_set(iid)
-        b = self._iid_map.get(iid)
-        if not b:
-            return
-        osm_id = b.get("osm_id", "")
-        self._detail.show(b)
 
+        # If the clicked row is not in the current selection, replace selection with it.
+        current_sel = self._tree.selection()
+        if iid not in current_sel:
+            self._tree.selection_set(iid)
+            current_sel = (iid,)
+
+        selected_iids = self._tree.selection()
         menu = tk.Menu(self, tearoff=0)
-        if osm_id in self._shortlist:
-            menu.add_command(label="★ Remove from Shortlist",
-                             command=lambda: self._toggle_shortlist(osm_id))
+
+        if len(selected_iids) > 1:
+            # Bulk menu
+            menu.add_command(
+                label=f"Add all {len(selected_iids)} selected to Shortlist",
+                command=lambda iids=selected_iids: self._bulk_shortlist_add(iids),
+            )
+            menu.add_command(
+                label=f"Remove all {len(selected_iids)} selected from Shortlist",
+                command=lambda iids=selected_iids: self._bulk_shortlist_remove(iids),
+            )
+            menu.add_separator()
+            menu.add_command(
+                label="Copy all selected names",
+                command=lambda iids=selected_iids: self._bulk_copy_names(iids),
+            )
+            menu.add_command(
+                label="Export selected to CSV",
+                command=lambda iids=selected_iids: self._export_selected_csv(iids),
+            )
+            if 2 <= len(selected_iids) <= 6:
+                menu.add_separator()
+                menu.add_command(
+                    label=f"Compare {len(selected_iids)} selected side-by-side",
+                    command=lambda iids=selected_iids: self._open_compare(iids),
+                )
         else:
-            menu.add_command(label="☆ Add to Shortlist",
-                             command=lambda: self._toggle_shortlist(osm_id))
-        menu.add_separator()
-        menu.add_command(label="✎ Add / Edit Note",
-                         command=self._detail._edit_note)
+            b = self._iid_map.get(iid)
+            if not b:
+                return
+            osm_id = b.get("osm_id", "")
+            self._detail.show(b)
+
+            if osm_id in self._shortlist:
+                menu.add_command(label="★ Remove from Shortlist",
+                                 command=lambda: self._toggle_shortlist(osm_id))
+            else:
+                menu.add_command(label="☆ Add to Shortlist",
+                                 command=lambda: self._toggle_shortlist(osm_id))
+            menu.add_separator()
+            menu.add_command(label="✎ Add / Edit Note",
+                             command=self._detail._edit_note)
+
         menu.tk_popup(event.x_root, event.y_root)
+
+    def _bulk_shortlist_add(self, iids):
+        """Add all selected rows to the shortlist."""
+        for iid in iids:
+            b = self._iid_map.get(iid)
+            if b:
+                osm_id = b.get("osm_id", "")
+                if osm_id:
+                    self._shortlist.add(osm_id)
+        self._apply_filters()
+
+    def _bulk_shortlist_remove(self, iids):
+        """Remove all selected rows from the shortlist."""
+        for iid in iids:
+            b = self._iid_map.get(iid)
+            if b:
+                osm_id = b.get("osm_id", "")
+                if osm_id:
+                    self._shortlist.discard(osm_id)
+        self._apply_filters()
+
+    def _bulk_copy_names(self, iids):
+        """Copy all selected business names to clipboard, newline-separated."""
+        names = []
+        for iid in iids:
+            b = self._iid_map.get(iid)
+            if b:
+                names.append(b.get("name", ""))
+        self.clipboard_clear()
+        self.clipboard_append("\n".join(names))
+        self._set_status(f"Copied {len(names)} business names to clipboard.")
+
+    def _open_compare(self, iids):
+        """Open side-by-side comparison for 2–6 selected businesses."""
+        businesses = [self._iid_map[iid] for iid in iids if iid in self._iid_map]
+        if len(businesses) < 2:
+            return
+        CompareDialog(self, businesses, self._notes)
+
+    def _export_selected_csv(self, iids):
+        """Export the selected businesses to CSV."""
+        businesses = [self._iid_map[iid] for iid in iids if iid in self._iid_map]
+        if not businesses:
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            initialfile=default_export_filename(),
+            title="Export Selected to CSV",
+        )
+        if not path:
+            return
+        try:
+            count = export_shortlist_csv(businesses, self._notes, path)
+            self._set_status(f"Exported {count} businesses to {os.path.basename(path)}.")
+        except Exception as e:
+            messagebox.showerror("Export Error", str(e))
 
     def _sort_by_column(self, col: str):
         """Sort treeview by column header click."""
-        # Map column id to sort key
+        ai_on = self._sidebar.ai_scoring_var.get()
         col_to_sort = {
-            "score": "Score",
+            "score": "AI Score" if ai_on else "Score",
             "name": "Name",
             "category": "Category",
             "industry": "Category",
@@ -1921,15 +2701,8 @@ class App(tk.Tk):
             lon = loc.get("lon")
             # Use explicit None check — lat=0.0 or lon=0.0 are valid coordinates
             if lat is not None and lon is not None:
-                self._search_lat = float(lat)
-                self._search_lon = float(lon)
-                self._addr_var.set(loc.get("address", ""))
-                # Manually put top bar into address mode (radiobutton command
-                # only fires on user click, not on programmatic set())
-                self._loc_mode.set("address")
-                self._addr_entry.config(state="normal")
-                self._save_loc_btn.config(state="normal")
-                self._load_loc_btn.config(state="normal")
+                address = loc.get("address", "")
+                self._set_resolved_location(address, float(lat), float(lon))
 
             radius = float(profile.get("radius_miles", self._search_radius))
             self._search_radius = radius
@@ -2036,6 +2809,175 @@ class App(tk.Tk):
             self._set_status(f"Profile '{result['name']}' updated.")
 
     # ------------------------------------------------------------------
+    # Saved Searches
+    # ------------------------------------------------------------------
+
+    def _save_search(self, name: str, state: dict):
+        self._saved_searches = [s for s in self._saved_searches if s["name"] != name]
+        self._saved_searches.insert(0, {"name": name, "state": state})
+        save_saved_searches(self._saved_searches)
+        self._sidebar.refresh_saved_searches(self._saved_searches)
+        self._set_status(f"Saved search '{name}'.")
+
+    def _delete_search(self, name: str):
+        self._saved_searches = [s for s in self._saved_searches if s["name"] != name]
+        save_saved_searches(self._saved_searches)
+        self._sidebar.refresh_saved_searches(self._saved_searches)
+
+    def _load_search(self, name: str):
+        for s in self._saved_searches:
+            if s["name"] == name:
+                self._sidebar.set_state(s["state"])
+                self._apply_filters()
+                break
+
+    # ------------------------------------------------------------------
+    # AI attribute filter
+    # ------------------------------------------------------------------
+
+    def _run_ai_attr_filter(self, query: str):
+        """Evaluate the AI attribute query against the currently visible businesses."""
+        if not self._ai_running:
+            messagebox.showinfo(
+                "AI Not Ready",
+                "Load an AI model first (AI Settings).",
+                parent=self,
+            )
+            return
+
+        # Build the candidate list from the current standard filters (no attr filter)
+        state = self._sidebar.get_state()
+        candidates = apply_standard_filters(
+            self._all_businesses,
+            name_query=state["name_query"],
+            category=state["category"],
+            hide_chains=state["hide_chains"],
+            min_score=state["min_score"],
+            open_now=state.get("open_now", False),
+            has_wheelchair=state.get("has_wheelchair", False),
+            has_outdoor_seating=state.get("has_outdoor_seating", False),
+            has_delivery=state.get("has_delivery", False),
+            has_takeout=state.get("has_takeout", False),
+        )
+        candidates = apply_custom_filter(
+            candidates,
+            rules=state["custom_rules"],
+            combine=state["custom_combine"],
+        )
+
+        MAX_AI_ATTR = 150
+        to_check = candidates[:MAX_AI_ATTR]
+        total = len(to_check)
+        if not to_check:
+            messagebox.showinfo("No Results", "No businesses to evaluate.", parent=self)
+            return
+
+        self._sidebar.set_ai_attr_status(f"Evaluating 0/{total}…")
+
+        q = queue.Queue()
+
+        def _run():
+            matches: set[str] = set()
+            for i, b in enumerate(to_check):
+                result = ai_scoring.check_attribute(b, query)
+                if result:
+                    matches.add(b.get("osm_id", ""))
+                q.put(("progress", i + 1, total, matches))
+            q.put(("done", matches))
+
+        def _process():
+            try:
+                while True:
+                    try:
+                        msg = q.get_nowait()
+                    except queue.Empty:
+                        break
+                    if msg[0] == "progress":
+                        _, done, tot, _ = msg
+                        self._sidebar.set_ai_attr_status(f"Evaluating {done}/{tot}…")
+                    elif msg[0] == "done":
+                        _, match_set = msg
+                        label = f"{len(match_set)} of {total} match"
+                        self._sidebar.set_ai_attr_status(label)
+                        self._sidebar.set_ai_attr_matches(match_set)
+                        return
+            except tk.TclError:
+                return
+            self.after(200, _process)
+
+        threading.Thread(target=_run, daemon=True).start()
+        _process()
+
+    # ------------------------------------------------------------------
+    # History
+    # ------------------------------------------------------------------
+
+    def _show_history(self):
+        dlg = tk.Toplevel(self)
+        dlg.title("View History")
+        dlg.geometry("500x400")
+        dlg.grab_set()
+        ttk.Label(dlg, text="Recently viewed businesses:", font=("", 10, "bold")).pack(
+            anchor="w", padx=10, pady=(10, 4))
+        frame = ttk.Frame(dlg)
+        frame.pack(fill="both", expand=True, padx=8, pady=4)
+        cols = ("name", "industry", "score", "viewed_at")
+        tree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="browse")
+        tree.heading("name",      text="Name")
+        tree.heading("industry",  text="Industry")
+        tree.heading("score",     text="Score")
+        tree.heading("viewed_at", text="Viewed")
+        tree.column("name",      width=180)
+        tree.column("industry",  width=120)
+        tree.column("score",     width=50)
+        tree.column("viewed_at", width=130)
+        sb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=sb.set)
+        tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        for entry in self._history:
+            tree.insert("", "end", values=(
+                entry.get("name", ""),
+                entry.get("industry", ""),
+                entry.get("score", ""),
+                entry.get("viewed_at", ""),
+            ))
+        btn_row = ttk.Frame(dlg)
+        btn_row.pack(fill="x", padx=8, pady=8)
+
+        def _clear():
+            if messagebox.askyesno("Clear History", "Clear all view history?", parent=dlg):
+                self._history = []
+                save_history(self._history)
+                tree.delete(*tree.get_children())
+
+        ttk.Button(btn_row, text="Clear History", command=_clear).pack(side="left")
+        ttk.Button(btn_row, text="Close", command=dlg.destroy).pack(side="right")
+
+    # ------------------------------------------------------------------
+    # JSON Export
+    # ------------------------------------------------------------------
+
+    def _export_json(self):
+        shortlisted = [b for b in self._all_businesses if b.get("osm_id", "") in self._shortlist]
+        if not shortlisted:
+            messagebox.showinfo("No Shortlist", "Add businesses to your shortlist first.")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            initialfile=default_export_filename().replace(".csv", ".json"),
+            title="Export Shortlist as JSON",
+        )
+        if not path:
+            return
+        try:
+            count = export_json(shortlisted, self._notes, path)
+            self._set_status(f"Exported {count} businesses to {os.path.basename(path)}.")
+        except Exception as e:
+            messagebox.showerror("Export Error", str(e))
+
+    # ------------------------------------------------------------------
     # AI Scoring
     # ------------------------------------------------------------------
 
@@ -2119,38 +3061,18 @@ class App(tk.Tk):
         finally:
             self._ai_prompt_active = False
 
-    def _open_ai_settings(self):
-        dlg = AISettingsDialog(
-            self,
-            current_model=self._ai_model,
-            current_weight=self._ai_weight,
-            explain_enabled=self._ai_explain_on,
-            score_enabled=self._ai_scoring_on,
-            max_score=self._ai_max_score,
-            disable_max_limit=self._ai_disable_max_limit,
-        )
+    def _open_settings(self, start_tab: int = 0):
+        """Open the unified Settings dialog (File > Settings)."""
+        try:
+            from ui.settings_dialog import SettingsDialog
+        except ImportError:
+            from settings_dialog import SettingsDialog
+        dlg = SettingsDialog(self, app=self, start_tab=start_tab)
         self.wait_window(dlg)
-        if dlg.confirmed:
-            self._ai_model      = dlg.result_model
-            self._ai_weight     = dlg.result_weight
-            self._ai_explain_on = dlg.result_explain
-            self._ai_scoring_on = dlg.result_scoring
-            self._ai_max_score  = dlg.result_max
-            self._ai_disable_max_limit = dlg.result_disable_max_limit
 
-            # Apply selected model immediately (if available) so AI works without restart.
-            self._ai_running = ai_scoring.load_default_model(self._ai_model)
-            if not self._ai_running:
-                for candidate in ai_scoring.list_models():
-                    if ai_scoring.load_default_model(candidate):
-                        self._ai_running = True
-                        self._ai_model = candidate
-                        break
-
-            self._sidebar.set_ai_status(self._ai_running)
-            self._sidebar.ai_scoring_var.set(self._ai_scoring_on)
-            self._save_ai_settings_to_config()
-            save_config(self._config)
+    def _open_ai_settings(self):
+        """Open Settings dialog pre-selected on the AI tab."""
+        self._open_settings(start_tab=1)
 
     def _save_ai_settings_to_config(self):
         self._config["ai_settings"] = {
@@ -2160,6 +3082,7 @@ class App(tk.Tk):
             "scoring_on": self._ai_scoring_on,
             "max_score": self._ai_max_score,
             "disable_max_limit": self._ai_disable_max_limit,
+            "debug_mode": self._ai_debug,
         }
 
     def _fetch_ai_explanation(self, business: dict):
@@ -2273,6 +3196,13 @@ class App(tk.Tk):
         threading.Thread(target=_run, daemon=True).start()
         _process()
 
+    def _update_score_column_heading(self):
+        """Update the Score column heading to reflect AI scoring mode."""
+        ai_on = self._sidebar.ai_scoring_var.get()
+        heading = "Score (AI)" if ai_on else "Score"
+        self._tree.heading("score", text=heading)
+        self._apply_filters()
+
     def _apply_ai_scores(self):
         """
         Merge AI scores into business dicts and re-populate the tree.
@@ -2287,7 +3217,7 @@ class App(tk.Tk):
                 b["combined_score"] = ai_scoring.compute_combined_score(
                     b.get("score", 0), entry["ai_score"], self._ai_weight
                 )
-        self._apply_filters()
+        self._update_score_column_heading()
 
     # ------------------------------------------------------------------
     # Notes
@@ -2350,6 +3280,8 @@ class App(tk.Tk):
         save_config(self._config)
         save_notes(self._notes)
         save_shortlist(self._shortlist)
+        save_history(self._history)
+        save_collections(self._collections)
         self.destroy()
 
 

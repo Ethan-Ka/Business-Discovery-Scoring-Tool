@@ -10,6 +10,7 @@ Each profile stores:
 
 import json
 import os
+import shutil
 
 try:
     from sponsor_finder.paths import get_profiles_path
@@ -18,13 +19,38 @@ except ImportError:
 
 PROFILES_FILE = get_profiles_path()
 
+# Bundled default profiles source — lives alongside this module in the package.
+_BUNDLED_PROFILES_SOURCE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "profiles", "profiles.json"
+)
+
 
 def _ensure_profiles_file_exists() -> None:
-    """Create profiles.json with an empty list if missing or empty."""
+    """Create profiles.json with default profiles if missing or empty.
+
+    Tries to copy from the bundled source file first so the full default
+    profile set is preserved.  Falls back to an empty list only if the
+    source is also unavailable.
+    """
     try:
-        if not os.path.exists(PROFILES_FILE) or os.path.getsize(PROFILES_FILE) == 0:
-            with open(PROFILES_FILE, "w", encoding="utf-8") as f:
-                json.dump([], f, indent=2, ensure_ascii=False)
+        needs_seed = (
+            not os.path.exists(PROFILES_FILE)
+            or os.path.getsize(PROFILES_FILE) == 0
+        )
+        if not needs_seed:
+            return
+
+        # Try the bundled source (only copy if it's a different file).
+        if (
+            os.path.exists(_BUNDLED_PROFILES_SOURCE)
+            and os.path.abspath(_BUNDLED_PROFILES_SOURCE) != os.path.abspath(PROFILES_FILE)
+        ):
+            shutil.copy2(_BUNDLED_PROFILES_SOURCE, PROFILES_FILE)
+            return
+
+        # Nothing to copy — write an empty list so the app can start cleanly.
+        with open(PROFILES_FILE, "w", encoding="utf-8") as f:
+            json.dump([], f, indent=2, ensure_ascii=False)
     except OSError:
         # Best effort only; callers still handle read failures safely.
         pass

@@ -1,0 +1,17 @@
+# Business Discovery & Scoring Tool — required packages
+# Install with: pip install -r requirements.txt
+
+# Core dependencies
+requests>=2.31.0           # HTTP client for Overpass, Wikidata
+geopy>=2.3.0               # Geocoding and distance calculations via Nominatim
+
+# AI and LLM
+llama-cpp-python>=0.2.0    # Direct local LLM inference (no external server needed)
+
+# Optional GUI enhancements
+tkintermapview>=1.6.0      # Interactive map widget for "Drop a Pin" feature (optional)
+
+# Development / optional
+# These are only needed if you want to freeze the app or contribute to development:
+# pyinstaller>=6.0          # For packaging as standalone .exe
+# pytest>=7.0                # For running tests

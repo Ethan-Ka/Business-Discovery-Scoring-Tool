@@ -115,22 +115,24 @@ def get_models_dir() -> str:
 
 
 def get_profiles_dir() -> str:
-    """Get profiles directory path, creating it if necessary."""
-    if getattr(sys, "frozen", False):
-        profiles_dir = os.path.join(get_app_base_dir(), "profiles")
-    else:
-        profiles_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "profiles")
+    """Get profiles directory path, creating it if necessary.
+
+    Always resolved relative to the app base directory so both data/ and
+    profiles/ sit alongside each other at the project / executable root.
+    """
+    profiles_dir = os.path.join(get_app_base_dir(), "profiles")
     os.makedirs(profiles_dir, exist_ok=True)
 
-    # One-time best-effort migration from legacy locations:
-    # 1) {script_dir}/profiles.json
-    # 2) {app_base}/profiles/profiles.json
-    # 3) {app_base}/profiles.json
+    # One-time best-effort migration from legacy locations (in priority order):
+    # 1) sponsor_finder/profiles/profiles.json  — old dev-mode package location
+    # 2) {script_dir}/profiles.json
+    # 3) {app_base}/profiles.json               — flat legacy location
     target_profiles = os.path.join(profiles_dir, "profiles.json")
     if not os.path.exists(target_profiles):
+        package_dir = os.path.dirname(os.path.abspath(__file__))
         legacy_candidates = [
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "profiles.json"),
-            os.path.join(get_app_base_dir(), "profiles", "profiles.json"),
+            os.path.join(package_dir, "profiles", "profiles.json"),
+            os.path.join(package_dir, "profiles.json"),
             os.path.join(get_app_base_dir(), "profiles.json"),
         ]
         for legacy_path in legacy_candidates:
@@ -148,3 +150,35 @@ def get_profiles_dir() -> str:
 def get_profiles_path() -> str:
     """Get path to profiles.json in the app-local profiles folder."""
     return os.path.join(get_profiles_dir(), "profiles.json")
+
+
+def get_history_path() -> str:
+    """Get path to history.json in the data folder."""
+    return os.path.join(get_data_dir(), "history.json")
+
+
+def get_saved_searches_path() -> str:
+    """Get path to saved_searches.json in the data folder."""
+    return os.path.join(get_data_dir(), "saved_searches.json")
+
+
+def get_collections_path() -> str:
+    """Get path to collections.json in the data folder."""
+    return os.path.join(get_data_dir(), "collections.json")
+
+
+def get_tile_cache_path() -> str:
+    """Get path to the map tile cache SQLite database."""
+    return os.path.join(get_data_dir(), "tile_cache.db")
+
+
+def get_logs_dir() -> str:
+    """Get path to the logs directory in the data folder, creating it if needed."""
+    logs_dir = os.path.join(get_data_dir(), "logs")
+    os.makedirs(logs_dir, exist_ok=True)
+    return logs_dir
+
+
+def get_log_path() -> str:
+    """Get path to the rotating app log file."""
+    return os.path.join(get_logs_dir(), "app.log")

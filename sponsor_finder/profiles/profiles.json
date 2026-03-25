@@ -4,6 +4,30 @@
         "description": "Find local businesses likely to sponsor a car meet or car club event in the DFW area. Prioritize independent, locally-owned brands connected to car culture, surrounding enthusiast hobbies, and food spots that naturally align with meet traffic.",
         "scoring_rules": [
             {
+                "field": "industry_relevance_tier",
+                "operator": "=",
+                "value": "excluded",
+                "points": -100
+            },
+            {
+                "field": "industry_relevance_tier",
+                "operator": "=",
+                "value": "primary",
+                "points": 10
+            },
+            {
+                "field": "name_has_car_keywords",
+                "operator": "=",
+                "value": true,
+                "points": 15
+            },
+            {
+                "field": "has_social_media",
+                "operator": "=",
+                "value": true,
+                "points": 5
+            },
+            {
                 "field": "industry",
                 "operator": "=",
                 "value": "Auto Parts",
