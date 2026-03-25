@@ -73,10 +73,16 @@ def _migrate_legacy_data_dir(data_dir: str) -> None:
 
     for root, _, files in os.walk(legacy_data_dir):
         rel_dir = os.path.relpath(root, legacy_data_dir)
+        rel_dir_norm = rel_dir.replace("\\", "/").lower()
+        if rel_dir_norm == "models" or rel_dir_norm.startswith("models/"):
+            # Never migrate bundled model binaries from legacy/package paths.
+            continue
         target_root = data_dir if rel_dir == "." else os.path.join(data_dir, rel_dir)
         os.makedirs(target_root, exist_ok=True)
 
         for filename in files:
+            if filename.lower().endswith(".gguf"):
+                continue
             src = os.path.join(root, filename)
             dst = os.path.join(target_root, filename)
             if os.path.exists(dst):

@@ -32,6 +32,22 @@ Or use the provided batch launcher:
 run.bat
 ```
 
+### Build EXE (Do Not Bundle Models)
+
+Use the included build script/spec to produce a packaged app that does **not**
+ship `.gguf` model files:
+
+```bash
+build_exe.bat
+```
+
+This calls PyInstaller with `business_finder.spec`, which intentionally sets
+no bundled data payload for models. AI models are always downloaded later by
+the end user into the local data folder.
+
+If you use auto-py-to-exe directly, do **not** add `data/models` (or any
+`.gguf` files) in "Additional Files".
+
 ## What Happens on First Launch
 
 When you run the app for the first time:
@@ -67,8 +83,12 @@ Downloaded from HuggingFace only when you first enable AI scoring. Choose one:
 - **gemma3:4b** — 3.3 GB, balanced
 - **phi3** — 2.3 GB, efficient
 
-Models are cached locally in `%LOCALAPPDATA%\sponsor_finder\models\` (Windows)
-or `~/.cache/sponsor_finder/models/` (macOS/Linux) and never re-downloaded.
+Models are cached locally in the app data folder:
+
+- Windows EXE: `<exe folder>\data\models\`
+- Source/dev run: `<project root>\data\models\`
+
+Once downloaded, models are reused and never re-downloaded unless deleted.
 
 ## Troubleshooting
 
@@ -98,7 +118,7 @@ If you want to use AI:
 - Then: `python sponsor_finder/main.py`
 
 **If using .exe:**
-- Try deleting `%LOCALAPPDATA%\sponsor_finder\models\` to clear cached AI files
+- Try deleting `<exe folder>\data\models\` to clear cached AI files
 - Then restart the app
 
 ### Performance Issues
@@ -118,7 +138,7 @@ If you want to reclaim disk space:
 
 **Windows:**
 1. Open File Explorer
-2. Navigate to: `%LOCALAPPDATA%\sponsor_finder\models\`
+2. Navigate to: `<exe folder>\data\models\`
 3. Delete the `.gguf` model files
 
 **macOS/Linux:**

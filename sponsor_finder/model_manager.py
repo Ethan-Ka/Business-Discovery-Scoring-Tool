@@ -77,6 +77,24 @@ OLLAMA_MODEL_REGISTRY = {
 }
 
 
+def _is_valid_gguf_file(path: Path) -> bool:
+    """Best-effort validation for local GGUF files.
+
+    We only do lightweight checks here so invalid/corrupt placeholders do not
+    appear as selectable models and cannot block AI startup.
+    """
+    try:
+        if not path.exists() or not path.is_file():
+            return False
+        if path.stat().st_size < 16:
+            return False
+        with open(path, "rb") as f:
+            magic = f.read(4)
+        return magic == b"GGUF"
+    except Exception:
+        return False
+
+
 def get_models_dir() -> Path:
     """Return the app-local models directory, migrating legacy model paths if needed."""
     models_dir = Path(get_models_dir_path())
@@ -121,7 +139,11 @@ def list_available_models() -> List[str]:
     if not models_dir.exists():
         return []
 
-    return [f.name for f in models_dir.glob("*.gguf")]
+    valid_models: List[str] = []
+    for f in models_dir.glob("*.gguf"):
+        if _is_valid_gguf_file(f):
+            valid_models.append(f.name)
+    return sorted(valid_models)
 
 
 def resolve_model_url(model_name: str) -> str:
@@ -269,6 +291,8 @@ def load_model(model_name: str, ctx_limit: int = 2048, n_gpu_layers: int = 0):
 
     if not filepath.exists():
         raise FileNotFoundError(f"Model file not found: {filepath}")
+    if not _is_valid_gguf_file(filepath):
+        raise ValueError(f"Invalid GGUF model file: {filepath}")
 
     info = get_model_info(model_name) or {}
     chat_format = info.get("chat_format")
